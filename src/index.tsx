@@ -610,10 +610,11 @@ app.get('/login', (c) => {
                 <i class="fas fa-sign-in-alt"></i> Sign In
               </button>
             </div>
-            <div class="mt-4 p-3 bg-[#f8fafc] rounded-lg text-sm text-[#475569]">
-              <p class="font-semibold mb-1">Demo Accounts:</p>
-              <p>Student: student@prepmaster.edu / Student@123</p>
-              <p>Admin: admin@prepmaster.edu / Admin@123</p>
+            <div class="mt-4 p-3 bg-[#fff8f0] border border-[#fde68a] rounded-lg text-sm text-[#475569]">
+              <p class="text-[#92400e]">هل تواجه مشكلة بالدخول؟ تواصل مع الدعم الفني</p>
+              <a href="https://wa.me/962798919150" target="_blank" class="flex items-center gap-2 mt-2 font-bold text-[#25d366] hover:underline">
+                <i class="fab fa-whatsapp text-lg"></i> واتساب: 0798919150
+              </a>
             </div>
           </div>
           
