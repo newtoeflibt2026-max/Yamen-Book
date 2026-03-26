@@ -477,7 +477,7 @@ app.use('/public/*', serveStatic({ root: './' }))
 
 // Favicon
 app.get('/favicon.svg', (c) => {
-  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a2b4a"/><text x="16" y="22" font-size="18" text-anchor="middle" fill="#f59e0b" font-family="Arial" font-weight="bold">P</text></svg>'
+  const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a2b4a"/><text x="16" y="22" font-size="18" text-anchor="middle" fill="#f59e0b" font-family="Arial" font-weight="bold">Y</text></svg>'
   return new Response(svg, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } })
 })
 
@@ -487,7 +487,7 @@ const getLayout = (title: string, body: string, scripts: string = '') => `<!DOCT
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>${title} - PrepMaster</title>
+  <title>${title} - The Yamen Guide</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
   <script src="https://cdn.tailwindcss.com"></script>
   <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet"/>
@@ -577,7 +577,7 @@ app.get('/login', (c) => {
           <div class="inline-flex items-center justify-center w-16 h-16 bg-[#f59e0b] rounded-2xl mb-4">
             <i class="fas fa-graduation-cap text-white text-2xl"></i>
           </div>
-          <h1 class="text-3xl font-bold text-white">PrepMaster</h1>
+          <h1 class="text-3xl font-bold text-white">The Yamen Guide</h1>
           <p class="text-[#94a3b8] mt-1">TOEFL & IELTS Preparation Platform</p>
         </div>
         <div class="card">
@@ -695,7 +695,7 @@ app.get('/dashboard', async (c) => {
 
   return c.html(getLayout('Dashboard', `
     <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> Prep<span class="accent">Master</span></a>
+      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
       <div class="flex items-center gap-4">
         <button onclick="toggleSidebar()" class="md:hidden text-white text-xl"><i class="fas fa-bars"></i></button>
         <span class="text-[#94a3b8] text-sm hidden sm:block"><i class="fas fa-user-circle mr-1"></i>${user.name}</span>
@@ -875,7 +875,7 @@ app.get('/practice', async (c) => {
 
   return c.html(getLayout('Practice', `
     <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> Prep<span class="accent">Master</span></a>
+      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
       <div class="flex items-center gap-4">
         <a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>Dashboard</a>
         <span class="text-[#94a3b8] text-sm hidden sm:block">${user.name}</span>
@@ -1024,7 +1024,7 @@ app.get('/exam', async (c) => {
 
   return c.html(getLayout('Practice Exam', `
     <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> Prep<span class="accent">Master</span></a>
+      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
       <div class="flex items-center gap-4">
         <div id="timerDisplay" class="flex items-center gap-2 bg-[#0f1e35] px-4 py-2 rounded-lg">
           <i class="fas fa-clock text-[#f59e0b]"></i>
@@ -1479,7 +1479,7 @@ app.get('/progress', async (c) => {
 
   return c.html(getLayout('My Progress', `
     <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> Prep<span class="accent">Master</span></a>
+      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
       <div class="flex items-center gap-4">
         <a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>Dashboard</a>
         <span class="text-[#94a3b8] text-sm hidden sm:block">${user.name}</span>
@@ -1578,7 +1578,7 @@ app.get('/admin', async (c) => {
 
   return c.html(getLayout('Admin Panel', `
     <nav class="navbar">
-      <a href="/admin" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> Prep<span class="accent">Master</span> <span class="text-xs text-[#94a3b8] ml-2 font-normal">Admin</span></a>
+      <a href="/admin" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span> <span class="text-xs text-[#94a3b8] ml-2 font-normal">Admin</span></a>
       <div class="flex items-center gap-4">
         <span class="text-[#94a3b8] text-sm hidden sm:block"><i class="fas fa-shield-alt mr-1 text-[#f59e0b]"></i>${user.name}</span>
         <button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn-secondary text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i> Logout</button>
