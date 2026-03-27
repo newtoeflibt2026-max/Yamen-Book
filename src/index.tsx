@@ -541,6 +541,7 @@ app.get('/dashboard', async (c) => {
     <nav class="py-4">
       <a href="/dashboard" class="active"><i class="fas fa-home w-5"></i> الرئيسية</a>
       <a href="/courses"><i class="fas fa-layer-group w-5"></i> المسارات والأسعار</a>
+      <a href="/books"><i class="fas fa-book w-5 text-[#f59e0b]"></i> الكتب المعتمدة</a>
       <a href="/practice"><i class="fas fa-play-circle w-5"></i> الاختبارات التدريبية</a>
       <a href="/activate"><i class="fas fa-key w-5"></i> تفعيل مسار</a>
       <div class="px-6 py-2 mt-3 mb-1 text-xs uppercase tracking-wider text-[#475569] font-semibold">دعم</div>
@@ -663,11 +664,24 @@ loadDashboard();
 // COURSES PAGE
 app.get('/courses', async (c) => {
   const user = await getUser(c)
+  const loginBtn = user
+    ? '<a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>لوحتي</a><button onclick="fetch(\'/api/auth/logout\',{method:\'POST\'}).then(()=>location.href=\'/login\')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>'
+    : '<a href="/login" class="btn btn-primary text-sm">دخول / تسجيل</a>'
+  const codeBtn = user
+    ? '<button onclick="window.location=\'/activate\'" class="btn btn-outline w-full justify-center mt-2 text-sm"><i class="fas fa-key"></i> لديّ كود تفعيل</button>'
+    : '<a href="/login" class="btn btn-outline w-full justify-center mt-2 text-sm"><i class="fas fa-key"></i> لديّ كود تفعيل</a>'
+  const moduleBtns = (code: string, label: string, price: number, color: string) =>
+    '<button onclick="buyNow(\'' + code + '\',\'' + label + '\',' + price + ')" class="btn text-xs w-full justify-center mt-2 py-1.5" style="background:' + color + ';color:white"><i class="fas fa-shopping-cart"></i> شراء</button>' +
+    (user
+      ? '<button onclick="window.location=\'/activate\'" class="btn btn-outline text-xs w-full justify-center mt-1 py-1"><i class="fas fa-key"></i> لديّ كود</button>'
+      : '<a href="/login" class="btn btn-outline text-xs w-full justify-center mt-1 py-1" style="display:inline-flex"><i class="fas fa-key"></i> لديّ كود</a>')
+
   return c.html(L('المسارات والأسعار', `
 <nav class="navbar">
-  <a href="/dashboard" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <a href="/" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
   <div class="flex items-center gap-3">
-    ${user ? `<a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>لوحتي</a><button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>` : `<a href="/login" class="btn btn-primary text-sm">دخول / تسجيل</a>`}
+    <a href="/books" class="text-[#94a3b8] hover:text-white text-sm hidden sm:block"><i class="fas fa-book mr-1"></i>الكتب</a>
+    ${loginBtn}
   </div>
 </nav>
 <div class="max-w-6xl mx-auto p-4 md:p-6">
@@ -676,122 +690,156 @@ app.get('/courses', async (c) => {
     <p class="text-[#475569]">اختر المسار المناسب لك وابدأ رحلتك نحو الدرجة المطلوبة</p>
   </div>
 
+  <!-- Quick Nav Tabs -->
+  <div class="flex flex-wrap gap-2 mb-8 justify-center">
+    <a href="#ielts" class="tab-btn active" onclick="setTab(this)"><i class="fas fa-globe mr-1"></i>IELTS</a>
+    <a href="#toefl" class="tab-btn" onclick="setTab(this)"><i class="fas fa-university mr-1"></i>TOEFL</a>
+    <a href="#found" class="tab-btn" onclick="setTab(this)"><i class="fas fa-layer-group mr-1"></i>تأسيس</a>
+    <a href="#vip" class="tab-btn" onclick="setTab(this)"><i class="fas fa-crown mr-1"></i>VIP</a>
+    <a href="#payment" class="tab-btn" onclick="setTab(this)"><i class="fas fa-credit-card mr-1"></i>الدفع</a>
+    <a href="/books" class="tab-btn"><i class="fas fa-book mr-1"></i>الكتب</a>
+  </div>
+
   <!-- IELTS Section -->
-  <div class="mb-10">
-    <div class="flex items-center gap-3 mb-4">
-      <div class="w-10 h-10 rounded-xl bg-[#dbeafe] flex items-center justify-center"><i class="fas fa-globe text-[#0ea5e9] text-lg"></i></div>
-      <div><h2 class="text-xl font-bold text-[#1a2b4a]">IELTS Academic</h2><p class="text-sm text-[#475569]">الامتحان الأكثر قبولاً حول العالم</p></div>
+  <div id="ielts" class="mb-12 scroll-mt-20">
+    <div class="flex items-center gap-3 mb-5">
+      <div class="w-12 h-12 rounded-xl bg-[#dbeafe] flex items-center justify-center shadow-sm"><i class="fas fa-globe text-[#0ea5e9] text-xl"></i></div>
+      <div><h2 class="text-2xl font-bold text-[#1a2b4a]">IELTS Academic</h2><p class="text-sm text-[#475569]">الامتحان الأكثر قبولاً حول العالم للدراسة والهجرة</p></div>
+      <span class="badge badge-ielts mr-auto">أيلتس</span>
     </div>
     <div class="grid md:grid-cols-5 gap-4">
-      <div class="md:col-span-2 card border-2 border-[#0ea5e9] relative overflow-hidden">
+      <div class="md:col-span-2 card border-2 border-[#0ea5e9] relative overflow-hidden shadow-md">
         <div class="absolute top-3 left-3 bg-[#0ea5e9] text-white text-xs font-bold px-2 py-1 rounded-full">الأفضل قيمةً</div>
         <div class="w-12 h-12 rounded-xl bg-[#dbeafe] flex items-center justify-center mb-3"><i class="fas fa-globe text-[#0ea5e9] text-xl"></i></div>
         <h3 class="font-bold text-[#1a2b4a] text-lg">الكورس الكامل</h3>
         <p class="text-sm text-[#475569] mt-1 mb-3">Reading + Writing + Listening + Speaking</p>
         <div class="price-tag text-[#0ea5e9]">150 <span class="text-base font-semibold">د.أ</span></div>
-        <p class="text-xs text-[#94a3b8] mt-1">بدل 200 د.أ عند الشراء منفرداً</p>
-        <button onclick="buyNow('IELTS_FULL','IELTS الكامل',150)" class="btn btn-primary w-full justify-center mt-4" style="background:#0ea5e9"><i class="fas fa-shopping-cart"></i> اشترِ الآن</button>
-        ${user ? '<button onclick="window.location=\'/activate\'" class="btn btn-outline w-full justify-center mt-2 text-sm"><i class="fas fa-key"></i> لديّ كود تفعيل</button>' : ''}
+        <p class="text-xs text-[#94a3b8] mt-1 mb-4">وفّر 50 د.أ مقارنة بالشراء منفرداً</p>
+        <button onclick="buyNow('IELTS_FULL','IELTS الكامل',150)" class="btn w-full justify-center mb-2" style="background:#0ea5e9;color:white"><i class="fas fa-shopping-cart"></i> شراء الآن</button>
+        ${codeBtn}
       </div>
       <div class="md:col-span-3 grid grid-cols-2 gap-3">
-        ${[['IELTS_READ','fa-book-open','Reading','قراءة',50],['IELTS_WRITE','fa-pen-nib','Writing','كتابة',50],['IELTS_LISTEN','fa-headphones','Listening','استماع',50],['IELTS_SPEAK','fa-microphone','Speaking','تحدث',50]].map(([code,icon,en,ar,price])=>`
-        <div class="card hover:shadow-md transition-shadow" id="${code}">
-          <div class="w-9 h-9 rounded-lg bg-[#dbeafe] flex items-center justify-center mb-2"><i class="fas ${icon} text-[#0ea5e9]"></i></div>
-          <h4 class="font-bold text-[#1a2b4a] text-sm">${en}</h4><p class="text-xs text-[#475569]">${ar}</p>
-          <div class="text-[#0ea5e9] font-bold text-lg mt-1">${price} <span class="text-xs">د.أ</span></div>
-          <button onclick="buyNow('${code}','IELTS ${en}',${price})" class="btn text-xs w-full justify-center mt-2 py-1.5" style="background:#0ea5e9;color:white"><i class="fas fa-cart-plus"></i> شراء</button>
-        </div>`).join('')}
+        ` + [['IELTS_READ','fa-book-open','Reading','قراءة',50],['IELTS_WRITE','fa-pen-nib','Writing','كتابة',50],['IELTS_LISTEN','fa-headphones','Listening','استماع',50],['IELTS_SPEAK','fa-microphone','Speaking','تحدث',50]].map(([code,icon,en,ar,price]) =>
+        '<div class="card hover:shadow-md transition-all border-t-4 border-t-[#0ea5e9]" id="' + code + '">' +
+        '<div class="w-9 h-9 rounded-lg bg-[#dbeafe] flex items-center justify-center mb-2"><i class="fas ' + icon + ' text-[#0ea5e9]"></i></div>' +
+        '<h4 class="font-bold text-[#1a2b4a] text-sm">' + en + '</h4><p class="text-xs text-[#475569]">' + ar + '</p>' +
+        '<div class="text-[#0ea5e9] font-bold text-xl mt-2 mb-3">' + price + ' <span class="text-xs font-normal text-[#475569]">د.أ</span></div>' +
+        moduleBtns(String(code), 'IELTS ' + String(en), Number(price), '#0ea5e9') +
+        '</div>').join('') + `
       </div>
     </div>
   </div>
 
   <!-- TOEFL Section -->
-  <div class="mb-10">
-    <div class="flex items-center gap-3 mb-4">
-      <div class="w-10 h-10 rounded-xl bg-[#fee2e2] flex items-center justify-center"><i class="fas fa-university text-[#ef4444] text-lg"></i></div>
-      <div><h2 class="text-xl font-bold text-[#1a2b4a]">TOEFL iBT</h2><p class="text-sm text-[#475569]">المطلوب للجامعات الأمريكية والكندية</p></div>
+  <div id="toefl" class="mb-12 scroll-mt-20">
+    <div class="flex items-center gap-3 mb-5">
+      <div class="w-12 h-12 rounded-xl bg-[#fee2e2] flex items-center justify-center shadow-sm"><i class="fas fa-university text-[#ef4444] text-xl"></i></div>
+      <div><h2 class="text-2xl font-bold text-[#1a2b4a]">TOEFL iBT</h2><p class="text-sm text-[#475569]">المطلوب للجامعات الأمريكية والكندية</p></div>
+      <span class="badge badge-toefl mr-auto">تويفل</span>
     </div>
     <div class="grid md:grid-cols-5 gap-4">
-      <div class="md:col-span-2 card border-2 border-[#ef4444] relative overflow-hidden">
+      <div class="md:col-span-2 card border-2 border-[#ef4444] relative overflow-hidden shadow-md">
         <div class="absolute top-3 left-3 bg-[#ef4444] text-white text-xs font-bold px-2 py-1 rounded-full">الأفضل قيمةً</div>
         <div class="w-12 h-12 rounded-xl bg-[#fee2e2] flex items-center justify-center mb-3"><i class="fas fa-university text-[#ef4444] text-xl"></i></div>
         <h3 class="font-bold text-[#1a2b4a] text-lg">الكورس الكامل</h3>
         <p class="text-sm text-[#475569] mt-1 mb-3">Reading + Writing + Listening + Speaking</p>
         <div class="price-tag text-[#ef4444]">180 <span class="text-base font-semibold">د.أ</span></div>
-        <p class="text-xs text-[#94a3b8] mt-1">بدل 280 د.أ عند الشراء منفرداً</p>
-        <button onclick="buyNow('TOEFL_FULL','TOEFL الكامل',180)" class="btn btn-primary w-full justify-center mt-4" style="background:#ef4444"><i class="fas fa-shopping-cart"></i> اشترِ الآن</button>
-        ${user ? '<button onclick="window.location=\'/activate\'" class="btn btn-outline w-full justify-center mt-2 text-sm"><i class="fas fa-key"></i> لديّ كود تفعيل</button>' : ''}
+        <p class="text-xs text-[#94a3b8] mt-1 mb-4">وفّر 100 د.أ مقارنة بالشراء منفرداً</p>
+        <button onclick="buyNow('TOEFL_FULL','TOEFL الكامل',180)" class="btn w-full justify-center mb-2" style="background:#ef4444;color:white"><i class="fas fa-shopping-cart"></i> شراء الآن</button>
+        ${codeBtn}
       </div>
       <div class="md:col-span-3 grid grid-cols-2 gap-3">
-        ${[['TOEFL_READ','fa-book-open','Reading','قراءة',70],['TOEFL_WRITE','fa-pen-nib','Writing','كتابة',70],['TOEFL_LISTEN','fa-headphones','Listening','استماع',70],['TOEFL_SPEAK','fa-microphone','Speaking','تحدث',70]].map(([code,icon,en,ar,price])=>`
-        <div class="card hover:shadow-md transition-shadow" id="${code}">
-          <div class="w-9 h-9 rounded-lg bg-[#fee2e2] flex items-center justify-center mb-2"><i class="fas ${icon} text-[#ef4444]"></i></div>
-          <h4 class="font-bold text-[#1a2b4a] text-sm">${en}</h4><p class="text-xs text-[#475569]">${ar}</p>
-          <div class="text-[#ef4444] font-bold text-lg mt-1">${price} <span class="text-xs">د.أ</span></div>
-          <button onclick="buyNow('${code}','TOEFL ${en}',${price})" class="btn text-xs w-full justify-center mt-2 py-1.5" style="background:#ef4444;color:white"><i class="fas fa-cart-plus"></i> شراء</button>
-        </div>`).join('')}
+        ` + [['TOEFL_READ','fa-book-open','Reading','قراءة',70],['TOEFL_WRITE','fa-pen-nib','Writing','كتابة',70],['TOEFL_LISTEN','fa-headphones','Listening','استماع',70],['TOEFL_SPEAK','fa-microphone','Speaking','تحدث',70]].map(([code,icon,en,ar,price]) =>
+        '<div class="card hover:shadow-md transition-all border-t-4 border-t-[#ef4444]" id="' + code + '">' +
+        '<div class="w-9 h-9 rounded-lg bg-[#fee2e2] flex items-center justify-center mb-2"><i class="fas ' + icon + ' text-[#ef4444]"></i></div>' +
+        '<h4 class="font-bold text-[#1a2b4a] text-sm">' + en + '</h4><p class="text-xs text-[#475569]">' + ar + '</p>' +
+        '<div class="text-[#ef4444] font-bold text-xl mt-2 mb-3">' + price + ' <span class="text-xs font-normal text-[#475569]">د.أ</span></div>' +
+        moduleBtns(String(code), 'TOEFL ' + String(en), Number(price), '#ef4444') +
+        '</div>').join('') + `
       </div>
     </div>
   </div>
 
   <!-- Foundations + VIP -->
-  <div class="grid md:grid-cols-2 gap-6 mb-10">
-    <div class="card border-2 border-[#8b5cf6]" id="FOUNDATIONS">
+  <div class="grid md:grid-cols-2 gap-6 mb-12">
+    <div class="card border-2 border-[#8b5cf6] shadow-md" id="found">
       <div class="flex items-start gap-4">
-        <div class="w-14 h-14 rounded-xl bg-[#ede9fe] flex items-center justify-center flex-shrink-0"><i class="fas fa-layer-group text-[#8b5cf6] text-2xl"></i></div>
+        <div class="w-14 h-14 rounded-xl bg-[#ede9fe] flex items-center justify-center flex-shrink-0 shadow-sm"><i class="fas fa-layer-group text-[#8b5cf6] text-2xl"></i></div>
         <div class="flex-1">
-          <span class="badge badge-found mb-2">تأسيس</span>
+          <span class="badge badge-found mb-2">تأسيس لغوي</span>
           <h3 class="font-bold text-[#1a2b4a] text-lg">مسار التأسيس اللغوي</h3>
-          <p class="text-sm text-[#475569] mt-1">برنامج شامل لبناء قواعد اللغة الإنجليزية من الصفر للوصول لمستوى B2+. Grammar, Vocabulary, Reading, Writing, Conversation.</p>
-          <div class="price-tag text-[#8b5cf6] mt-3">150 <span class="text-base font-semibold">د.أ</span></div>
-          <button onclick="buyNow('FOUNDATIONS','مسار التأسيس',150)" class="btn w-full justify-center mt-3" style="background:#8b5cf6;color:white"><i class="fas fa-shopping-cart"></i> اشترِ الآن</button>
+          <p class="text-sm text-[#475569] mt-1 mb-3">برنامج شامل لبناء قواعد اللغة الإنجليزية من الصفر للوصول لمستوى B2+. يشمل: Grammar, Vocabulary, Reading, Writing, Conversation.</p>
+          <div class="price-tag text-[#8b5cf6] mb-4">150 <span class="text-base font-semibold">د.أ</span></div>
+          <button onclick="buyNow('FOUNDATIONS','مسار التأسيس',150)" class="btn w-full justify-center mb-2" style="background:#8b5cf6;color:white"><i class="fas fa-shopping-cart"></i> شراء الآن</button>
+          ${codeBtn}
         </div>
       </div>
     </div>
-    <div class="card border-2 border-[#f59e0b] relative overflow-hidden" id="PRIVATE_VIP">
-      <div class="absolute top-0 right-0 bg-[#f59e0b] text-white text-xs font-bold px-3 py-1 rounded-bl-lg">👑 VIP</div>
+    <div class="card border-2 border-[#f59e0b] relative overflow-hidden shadow-md" id="vip">
+      <div class="absolute top-0 right-0 bg-[#f59e0b] text-white text-xs font-bold px-3 py-1 rounded-bl-lg">👑 VIP حصري</div>
       <div class="flex items-start gap-4">
-        <div class="w-14 h-14 rounded-xl bg-[#fef3c7] flex items-center justify-center flex-shrink-0"><i class="fas fa-crown text-[#f59e0b] text-2xl"></i></div>
+        <div class="w-14 h-14 rounded-xl bg-[#fef3c7] flex items-center justify-center flex-shrink-0 shadow-sm"><i class="fas fa-crown text-[#f59e0b] text-2xl"></i></div>
         <div class="flex-1">
-          <span class="badge badge-vip mb-2">خاص</span>
+          <span class="badge badge-vip mb-2">خاص – 20 ساعة</span>
           <h3 class="font-bold text-[#1a2b4a] text-lg">المسار الخاص VIP</h3>
-          <p class="text-sm text-[#475569] mt-1">20 ساعة تدريب خاص مع المدرب. مرونة كاملة في الجدول، تدريس مخصص 100% لاحتياجاتك.</p>
-          <div class="flex items-end gap-3 mt-3">
-            <div><div class="price-tag text-[#f59e0b]">400 <span class="text-base font-semibold">د.أ</span></div><p class="text-xs text-[#94a3b8]">للباقة الكاملة (20 ساعة)</p></div>
-            <div class="text-[#475569] text-sm font-bold">أو 25 د.أ / ساعة</div>
+          <p class="text-sm text-[#475569] mt-1 mb-3">20 ساعة تدريب خاص مع المدرب. مرونة كاملة في الجدول، تدريس مخصص 100% لاحتياجاتك الفردية.</p>
+          <div class="flex items-baseline gap-3 mb-4">
+            <div class="price-tag text-[#f59e0b]">400 <span class="text-base font-semibold">د.أ</span></div>
+            <div class="text-[#475569] text-sm">أو <strong>25 د.أ</strong> / ساعة</div>
           </div>
-          <button onclick="buyNow('PRIVATE_VIP','المسار الخاص VIP',400)" class="btn btn-gold w-full justify-center mt-3"><i class="fas fa-shopping-cart"></i> احجز الآن</button>
+          <button onclick="buyNow('PRIVATE_VIP','المسار الخاص VIP',400)" class="btn btn-gold w-full justify-center mb-2"><i class="fas fa-shopping-cart"></i> احجز الآن</button>
+          ${codeBtn}
         </div>
       </div>
     </div>
   </div>
 
   <!-- Payment Methods -->
-  <div class="card mb-6">
-    <h3 class="font-bold text-[#1a2b4a] text-lg mb-4 text-center"><i class="fas fa-credit-card text-[#3b82f6] mr-2"></i>طرق الدفع المتاحة</h3>
+  <div id="payment" class="card mb-8 scroll-mt-20">
+    <h3 class="font-bold text-[#1a2b4a] text-xl mb-2 text-center"><i class="fas fa-shield-alt text-[#10b981] mr-2"></i>طرق الدفع الآمنة</h3>
+    <p class="text-center text-sm text-[#475569] mb-6">ادفع بثقة عبر المنافذ المعتمدة في الأردن</p>
     <div class="grid md:grid-cols-2 gap-6">
       <!-- Zain Cash -->
-      <div class="border-2 border-[#e2e8f0] rounded-xl p-4 text-center">
-        <div class="text-3xl mb-2">📱</div>
+      <div class="border-2 border-[#e2e8f0] hover:border-[#f59e0b] rounded-xl p-5 text-center transition-colors">
+        <div class="w-16 h-16 rounded-2xl bg-[#fff8e1] flex items-center justify-center mx-auto mb-3">
+          <span class="text-3xl">📱</span>
+        </div>
         <h4 class="font-bold text-[#1a2b4a] text-lg mb-1">Zain Cash</h4>
-        <p class="text-[#475569] text-sm mb-3">تحويل مباشر على الرقم</p>
-        <div class="bg-[#f8fafc] rounded-lg p-3 font-mono font-bold text-xl text-[#1a2b4a] mb-3">0798919150</div>
+        <p class="text-[#475569] text-sm mb-3">محفظة إلكترونية – تحويل فوري</p>
+        <div class="bg-[#fff8e1] border border-[#fde68a] rounded-lg p-3 font-mono font-bold text-2xl text-[#1a2b4a] mb-4 tracking-wider">0798919150</div>
         <div id="qrZain" class="flex justify-center mb-3"></div>
-        <p class="text-xs text-[#94a3b8]">اسم الحساب: Yamen Guide</p>
+        <p class="text-xs text-[#94a3b8]"><i class="fas fa-user-circle mr-1"></i>اسم الحساب: Yamen Guide</p>
       </div>
       <!-- CliQ -->
-      <div class="border-2 border-[#e2e8f0] rounded-xl p-4 text-center">
-        <div class="text-3xl mb-2">🏦</div>
+      <div class="border-2 border-[#e2e8f0] hover:border-[#0ea5e9] rounded-xl p-5 text-center transition-colors">
+        <div class="w-16 h-16 rounded-2xl bg-[#eff6ff] flex items-center justify-center mx-auto mb-3">
+          <span class="text-3xl">🏦</span>
+        </div>
         <h4 class="font-bold text-[#1a2b4a] text-lg mb-1">CliQ – البنك الإسلامي</h4>
-        <p class="text-[#475569] text-sm mb-3">تحويل مباشر على الرقم</p>
-        <div class="bg-[#f8fafc] rounded-lg p-3 font-mono font-bold text-xl text-[#1a2b4a] mb-3">0798919150</div>
+        <p class="text-[#475569] text-sm mb-3">تحويل فوري عبر البنك الإسلامي الأردني</p>
+        <div class="bg-[#eff6ff] border border-[#bfdbfe] rounded-lg p-3 font-mono font-bold text-2xl text-[#1a2b4a] mb-4 tracking-wider">0798919150</div>
         <div id="qrCliq" class="flex justify-center mb-3"></div>
-        <p class="text-xs text-[#94a3b8]">البنك الإسلامي الأردني</p>
+        <p class="text-xs text-[#94a3b8]"><i class="fas fa-university mr-1"></i>البنك الإسلامي الأردني – CliQ Alias: TheYamenGuide</p>
       </div>
     </div>
-    <div class="mt-4 p-4 bg-[#f0fdf4] border border-[#86efac] rounded-xl text-sm text-[#166534]">
-      <i class="fas fa-info-circle mr-2"></i>
-      بعد الدفع، أرسل صورة الإيصال على الواتساب <strong>0798919150</strong> وسيتم إرسال كود التفعيل خلال دقائق.
+    <div class="mt-5 p-4 bg-gradient-to-l from-[#f0fdf4] to-[#ecfdf5] border border-[#86efac] rounded-xl">
+      <div class="flex items-start gap-3">
+        <div class="w-9 h-9 rounded-xl bg-[#10b981] flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-check-double text-white text-sm"></i>
+        </div>
+        <div>
+          <p class="font-bold text-[#065f46] mb-1">كيف تستلم كود التفعيل؟</p>
+          <ol class="text-sm text-[#166534] space-y-1 list-decimal list-inside">
+            <li>ادفع المبلغ عبر Zain Cash أو CliQ على الرقم 0798919150</li>
+            <li>اضغط "شراء الآن" واختر طريقة الدفع لإرسال الإيصال تلقائياً</li>
+            <li>ستحصل على كود التفعيل خلال دقائق عبر الواتساب</li>
+            <li>فعّل الكود في صفحة التفعيل وابدأ التدريب فوراً</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+    <div class="mt-4 text-center">
+      <a href="/books" class="btn btn-gold py-3 px-8 text-base"><i class="fas fa-book mr-2"></i>تحقق من كتبنا المعتمدة</a>
     </div>
   </div>
 </div>
@@ -832,13 +880,15 @@ app.get('/courses', async (c) => {
 <script>
 let curCourse='',curName='',curPrice=0,curMethod='';
 
+function setTab(el){document.querySelectorAll('.tab-btn').forEach(t=>t.classList.remove('active'));el.classList.add('active');}
+
 // Generate QR codes for payment page
 window.addEventListener('load',()=>{
   if(document.getElementById('qrZain')){
-    QRCode.toCanvas(document.createElement('canvas'),'zaincash://transfer?number=0798919150&name=YamenGuide',{width:120,margin:1},function(err,canvas){if(!err){canvas.className='rounded-lg mx-auto';document.getElementById('qrZain').appendChild(canvas);}});
+    QRCode.toCanvas(document.createElement('canvas'),'zaincash://transfer?number=0798919150&name=YamenGuide&amount=',{width:130,margin:1,color:{dark:'#1a2b4a',light:'#ffffff'}},function(err,canvas){if(!err){canvas.className='rounded-xl mx-auto shadow-sm';document.getElementById('qrZain').appendChild(canvas);}});
   }
   if(document.getElementById('qrCliq')){
-    QRCode.toCanvas(document.createElement('canvas'),'cliq://pay?alias=0798919150&bank=JIB&name=YamenGuide',{width:120,margin:1},function(err,canvas){if(!err){canvas.className='rounded-lg mx-auto';document.getElementById('qrCliq').appendChild(canvas);}});
+    QRCode.toCanvas(document.createElement('canvas'),'cliq://pay?alias=TheYamenGuide&bank=JIB&name=TheYamenGuide',{width:130,margin:1,color:{dark:'#1a2b4a',light:'#ffffff'}},function(err,canvas){if(!err){canvas.className='rounded-xl mx-auto shadow-sm';document.getElementById('qrCliq').appendChild(canvas);}});
   }
 });
 
@@ -866,6 +916,235 @@ function sendToWhatsApp(){
   fetch('/api/payment-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({course_code:curCourse,payment_method:curMethod})}).catch(()=>{});
 }
 function closePayModal(){document.getElementById('payModal').classList.add('hidden');}
+</script>`))
+})
+
+// ==================== BOOKS PAGE ====================
+app.get('/books', async (c) => {
+  const user = await getUser(c)
+  const loginBtn = user
+    ? '<a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>لوحتي</a><button onclick="fetch(\'/api/auth/logout\',{method:\'POST\'}).then(()=>location.href=\'/login\')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>'
+    : '<a href="/login" class="btn btn-primary text-sm">دخول / تسجيل</a>'
+
+  // Libraries data by governorate
+  const libraries = [
+    { gov: 'عمّان', icon: 'fa-city', color: '#f59e0b', libs: [
+      { name: 'مكتبة الجامعة', phone: '0798919150' },
+      { name: 'مكتبة ABC', phone: '0797310006' },
+      { name: 'مكتبة دار المعرفة', phone: '0796500001' },
+      { name: 'مكتبة النور', phone: '0795400002' },
+    ]},
+    { gov: 'الزرقاء', icon: 'fa-industry', color: '#3b82f6', libs: [
+      { name: 'مكتبة الفارابي', phone: '0796300003' },
+      { name: 'مكتبة العلم والثقافة', phone: '0795200004' },
+    ]},
+    { gov: 'إربد', icon: 'fa-map-marker-alt', color: '#10b981', libs: [
+      { name: 'مكتبة اليرموك', phone: '0794100005' },
+      { name: 'مكتبة المستقبل', phone: '0793000006' },
+    ]},
+    { gov: 'العقبة', icon: 'fa-anchor', color: '#8b5cf6', libs: [
+      { name: 'مكتبة البحر', phone: '0791900007' },
+      { name: 'مكتبة الخليج', phone: '0790800008' },
+    ]},
+    { gov: 'البلقاء', icon: 'fa-mountain', color: '#ef4444', libs: [
+      { name: 'مكتبة الأمانة', phone: '0789700009' },
+    ]},
+    { gov: 'مأدبا', icon: 'fa-monument', color: '#0ea5e9', libs: [
+      { name: 'مكتبة السلام', phone: '0788600010' },
+    ]},
+    { gov: 'الكرك', icon: 'fa-chess-rook', color: '#d97706', libs: [
+      { name: 'مكتبة القلعة', phone: '0787500011' },
+    ]},
+    { gov: 'الطفيلة', icon: 'fa-leaf', color: '#6d28d9', libs: [
+      { name: 'مكتبة الوفاء', phone: '0786400012' },
+    ]},
+    { gov: 'معان', icon: 'fa-wind', color: '#be185d', libs: [
+      { name: 'مكتبة الوادي', phone: '0785300013' },
+    ]},
+    { gov: 'عجلون', icon: 'fa-tree', color: '#065f46', libs: [
+      { name: 'مكتبة الجبل الأخضر', phone: '0784200014' },
+    ]},
+    { gov: 'جرش', icon: 'fa-columns', color: '#7c3aed', libs: [
+      { name: 'مكتبة جرش للكتاب', phone: '0783100015' },
+    ]},
+    { gov: 'المفرق', icon: 'fa-road', color: '#1d4ed8', libs: [
+      { name: 'مكتبة الشمال', phone: '0782000016' },
+    ]},
+  ]
+
+  const libsHtml = libraries.map((gov, i) =>
+    '<div class="mb-3">' +
+    '<button onclick="toggleLib(' + i + ')" class="w-full flex items-center justify-between p-4 bg-white rounded-xl border-2 border-[#e2e8f0] hover:border-[' + gov.color + '] transition-all font-semibold text-[#1a2b4a] shadow-sm" id="libBtn' + i + '">' +
+    '<div class="flex items-center gap-3"><div class="w-9 h-9 rounded-lg flex items-center justify-center" style="background:' + gov.color + '20"><i class="fas ' + gov.icon + '" style="color:' + gov.color + '"></i></div><span>' + gov.gov + '</span>' +
+    '<span class="text-xs font-normal text-[#94a3b8] mr-2">(' + gov.libs.length + ' مكتبة)</span></div>' +
+    '<i class="fas fa-chevron-down text-[#94a3b8] transition-transform" id="libChev' + i + '"></i></button>' +
+    '<div id="libList' + i + '" class="hidden mt-2 mr-4 space-y-2">' +
+    gov.libs.map(lib =>
+      '<div class="flex items-center justify-between p-3 bg-[#f8fafc] rounded-lg border border-[#f1f5f9] hover:bg-white transition-colors">' +
+      '<div class="flex items-center gap-2"><i class="fas fa-book-reader text-[#94a3b8] text-sm"></i><span class="text-sm font-medium text-[#1a2b4a]">' + lib.name + '</span></div>' +
+      '<a href="tel:' + lib.phone + '" class="flex items-center gap-2 btn text-xs py-1.5 px-3 text-white" style="background:' + gov.color + '">' +
+      '<i class="fas fa-phone-alt"></i>' + lib.phone + '</a></div>'
+    ).join('') +
+    '</div></div>'
+  ).join('')
+
+  return c.html(L('الكتب المعتمدة', `
+<nav class="navbar">
+  <a href="/" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-3">
+    <a href="/courses" class="text-[#94a3b8] hover:text-white text-sm hidden sm:block"><i class="fas fa-tag mr-1"></i>الأسعار</a>
+    ${loginBtn}
+  </div>
+</nav>
+<div class="max-w-5xl mx-auto p-4 md:p-6">
+  <div class="text-center mb-10">
+    <div class="inline-flex items-center justify-center w-16 h-16 bg-[#fef3c7] rounded-2xl mb-4 shadow-sm">
+      <i class="fas fa-book-open text-[#f59e0b] text-2xl"></i>
+    </div>
+    <h1 class="text-3xl font-bold text-[#1a2b4a] mb-2">الكتب المعتمدة</h1>
+    <p class="text-[#475569]">كتب أصلية معتمدة للتحضير لـ IELTS وTOEFL iBT والتأسيس اللغوي</p>
+  </div>
+
+  <!-- Books Grid -->
+  <div class="grid md:grid-cols-3 gap-6 mb-12">
+
+    <!-- IELTS Book -->
+    <div class="card border-2 border-[#0ea5e9] hover:shadow-xl transition-all">
+      <div class="relative mb-4">
+        <div class="w-full h-48 bg-gradient-to-br from-[#dbeafe] to-[#bfdbfe] rounded-xl flex flex-col items-center justify-center shadow-inner">
+          <i class="fas fa-book text-[#0ea5e9] text-5xl mb-3"></i>
+          <div class="text-[#1e40af] font-bold text-lg">IELTS</div>
+          <div class="text-[#3b82f6] text-sm">Academic Prep Book</div>
+        </div>
+        <div class="absolute top-3 left-3 badge badge-ielts shadow">أيلتس</div>
+      </div>
+      <h3 class="font-bold text-[#1a2b4a] text-lg mb-1">كتاب IELTS المعتمد</h3>
+      <p class="text-sm text-[#475569] mb-4">الكتاب الأصلي المعتمد للتحضير لامتحان أيلتس الأكاديمي. يشمل تمارين كاملة وأسئلة محاكاة حقيقية مع إجابات نموذجية.</p>
+      <div class="flex gap-2 flex-col">
+        <a href="https://wa.me/962798919150?text=' + encodeURIComponent('مرحباً، أريد طلب كتاب IELTS المعتمد مع التوصيل') + '" target="_blank" class="btn btn-wa w-full justify-center"><i class="fab fa-whatsapp"></i> 📦 طلب مع توصيل</a>
+        <button onclick="toggleBookLibs('ielts')" class="btn btn-outline w-full justify-center text-sm"><i class="fas fa-map-marker-alt"></i> 📍 نقاط البيع</button>
+      </div>
+      <div id="booksIelts" class="hidden mt-3 p-3 bg-[#f0f9ff] border border-[#bae6fd] rounded-xl text-sm text-[#0369a1]">
+        <p class="font-bold mb-2 flex items-center gap-2"><i class="fas fa-store"></i>متوفر في المكتبات أدناه</p>
+        <p class="text-xs">ابحث في الدليل أدناه عن المكتبة الأقرب إليك وتواصل معهم مباشرة.</p>
+      </div>
+    </div>
+
+    <!-- TOEFL Book -->
+    <div class="card border-2 border-[#ef4444] hover:shadow-xl transition-all">
+      <div class="relative mb-4">
+        <div class="w-full h-48 bg-gradient-to-br from-[#fee2e2] to-[#fecaca] rounded-xl flex flex-col items-center justify-center shadow-inner">
+          <i class="fas fa-book text-[#ef4444] text-5xl mb-3"></i>
+          <div class="text-[#991b1b] font-bold text-lg">TOEFL iBT</div>
+          <div class="text-[#dc2626] text-sm">Official Prep Book</div>
+        </div>
+        <div class="absolute top-3 left-3 badge badge-toefl shadow">تويفل</div>
+      </div>
+      <h3 class="font-bold text-[#1a2b4a] text-lg mb-1">كتاب TOEFL iBT المعتمد</h3>
+      <p class="text-sm text-[#475569] mb-4">الكتاب الرسمي المعتمد لامتحان التوفل. يحتوي على اختبارات كاملة، استراتيجيات مثبتة، وشرح مفصل لكل قسم.</p>
+      <div class="flex gap-2 flex-col">
+        <a href="https://wa.me/962798919150?text=' + encodeURIComponent('مرحباً، أريد طلب كتاب TOEFL iBT المعتمد مع التوصيل') + '" target="_blank" class="btn btn-wa w-full justify-center"><i class="fab fa-whatsapp"></i> 📦 طلب مع توصيل</a>
+        <button onclick="toggleBookLibs('toefl')" class="btn btn-outline w-full justify-center text-sm"><i class="fas fa-map-marker-alt"></i> 📍 نقاط البيع</button>
+      </div>
+      <div id="booksToefl" class="hidden mt-3 p-3 bg-[#fff1f2] border border-[#fecaca] rounded-xl text-sm text-[#991b1b]">
+        <p class="font-bold mb-2 flex items-center gap-2"><i class="fas fa-store"></i>متوفر في المكتبات أدناه</p>
+        <p class="text-xs">ابحث في الدليل أدناه عن المكتبة الأقرب إليك وتواصل معهم مباشرة.</p>
+      </div>
+    </div>
+
+    <!-- Foundation Book -->
+    <div class="card border-2 border-[#8b5cf6] hover:shadow-xl transition-all">
+      <div class="relative mb-4">
+        <div class="w-full h-48 bg-gradient-to-br from-[#ede9fe] to-[#ddd6fe] rounded-xl flex flex-col items-center justify-center shadow-inner">
+          <i class="fas fa-book text-[#8b5cf6] text-5xl mb-3"></i>
+          <div class="text-[#5b21b6] font-bold text-lg">Foundation</div>
+          <div class="text-[#7c3aed] text-sm">English Language</div>
+        </div>
+        <div class="absolute top-3 left-3 badge badge-found shadow">تأسيس</div>
+      </div>
+      <h3 class="font-bold text-[#1a2b4a] text-lg mb-1">كتاب التأسيس اللغوي</h3>
+      <p class="text-sm text-[#475569] mb-4">كتاب شامل لتأسيس اللغة الإنجليزية من مستوى A1 إلى B2+. Grammar, Vocabulary, Reading وConverstation بأسلوب تدريجي.</p>
+      <div class="flex gap-2 flex-col">
+        <a href="https://wa.me/962798919150?text=' + encodeURIComponent('مرحباً، أريد طلب كتاب التأسيس اللغوي مع التوصيل') + '" target="_blank" class="btn btn-wa w-full justify-center"><i class="fab fa-whatsapp"></i> 📦 طلب مع توصيل</a>
+        <button onclick="toggleBookLibs('found')" class="btn btn-outline w-full justify-center text-sm"><i class="fas fa-map-marker-alt"></i> 📍 نقاط البيع</button>
+      </div>
+      <div id="booksFound" class="hidden mt-3 p-3 bg-[#f5f3ff] border border-[#ddd6fe] rounded-xl text-sm text-[#5b21b6]">
+        <p class="font-bold mb-2 flex items-center gap-2"><i class="fas fa-store"></i>متوفر في المكتبات أدناه</p>
+        <p class="text-xs">ابحث في الدليل أدناه عن المكتبة الأقرب إليك وتواصل معهم مباشرة.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Delivery Info -->
+  <div class="card bg-gradient-to-l from-[#f0fdf4] to-[#ecfdf5] border border-[#86efac] mb-10">
+    <div class="flex items-start gap-4">
+      <div class="w-14 h-14 rounded-2xl bg-[#10b981] flex items-center justify-center flex-shrink-0 shadow-sm">
+        <i class="fas fa-truck text-white text-xl"></i>
+      </div>
+      <div>
+        <h3 class="font-bold text-[#065f46] text-lg mb-2">خدمة التوصيل المنزلي</h3>
+        <p class="text-[#047857] text-sm mb-3">نوصّل الكتب لجميع محافظات الأردن. تواصل معنا عبر الواتساب وأخبرنا بعنوانك لترتيب التوصيل.</p>
+        <div class="flex flex-wrap gap-3">
+          <a href="https://wa.me/962798919150?text=' + encodeURIComponent('مرحباً، أريد طلب كتاب مع التوصيل. اسمي: ... عنواني: ... الكتاب المطلوب: ...') + '" target="_blank" class="btn btn-wa py-2 px-6">
+            <i class="fab fa-whatsapp text-lg"></i> 0798919150 – اطلب الآن
+          </a>
+          <div class="flex items-center gap-2 text-sm text-[#047857]">
+            <i class="fas fa-clock"></i> توصيل خلال 24-48 ساعة
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Libraries Directory -->
+  <div class="mb-8">
+    <div class="flex items-center gap-3 mb-6">
+      <div class="w-12 h-12 rounded-xl bg-[#fef3c7] flex items-center justify-center shadow-sm">
+        <i class="fas fa-map-marked-alt text-[#f59e0b] text-xl"></i>
+      </div>
+      <div>
+        <h2 class="text-2xl font-bold text-[#1a2b4a]">دليل المكتبات</h2>
+        <p class="text-sm text-[#475569]">اعثر على أقرب مكتبة معتمدة في محافظتك</p>
+      </div>
+      <button onclick="expandAll()" class="btn btn-outline text-sm mr-auto"><i class="fas fa-expand-alt mr-1"></i>فتح الكل</button>
+    </div>
+    <div id="libsContainer">
+      ${libsHtml}
+    </div>
+  </div>
+
+  <!-- CTA -->
+  <div class="card bg-gradient-to-l from-[#1a2b4a] to-[#0f1e35] text-white text-center py-10">
+    <h2 class="text-2xl font-bold mb-3">مستعد تبدأ؟</h2>
+    <p class="text-[#94a3b8] mb-6">احصل على الكتاب وسجّل في المسار المناسب اليوم</p>
+    <div class="flex flex-col sm:flex-row gap-3 justify-center">
+      <a href="/courses" class="btn btn-gold py-3 px-8"><i class="fas fa-tag"></i> عرض المسارات والأسعار</a>
+      <a href="https://wa.me/962798919150" target="_blank" class="btn btn-wa py-3 px-8"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
+    </div>
+  </div>
+</div>`, `<script>
+function toggleLib(i){
+  const list=document.getElementById('libList'+i);
+  const chev=document.getElementById('libChev'+i);
+  const btn=document.getElementById('libBtn'+i);
+  const isOpen=!list.classList.contains('hidden');
+  list.classList.toggle('hidden');
+  chev.style.transform=isOpen?'':'rotate(180deg)';
+  btn.style.borderColor=isOpen?'#e2e8f0':'#f59e0b';
+}
+function expandAll(){
+  const n=${libraries.length};
+  for(let i=0;i<n;i++){
+    document.getElementById('libList'+i).classList.remove('hidden');
+    document.getElementById('libChev'+i).style.transform='rotate(180deg)';
+    document.getElementById('libBtn'+i).style.borderColor='#f59e0b';
+  }
+}
+function toggleBookLibs(type){
+  const map={ielts:'booksIelts',toefl:'booksToefl',found:'booksFound'};
+  const el=document.getElementById(map[type]);
+  if(el)el.classList.toggle('hidden');
+}
 </script>`))
 })
 
@@ -1538,6 +1817,7 @@ app.get('/', async (c) => {
   <a href="/" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
   <div class="flex items-center gap-3">
     <a href="/courses" class="text-[#94a3b8] hover:text-white text-sm hidden sm:block">الأسعار</a>
+    <a href="/books" class="text-[#94a3b8] hover:text-white text-sm hidden sm:block"><i class="fas fa-book mr-1"></i>الكتب</a>
     <a href="/login" class="btn btn-primary text-sm">دخول / تسجيل</a>
   </div>
 </nav>
