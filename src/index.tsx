@@ -3,1926 +3,1595 @@ import { cors } from 'hono/cors'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import { serveStatic } from 'hono/cloudflare-workers'
 
-type Bindings = {
-  DB: D1Database
-}
-
+type Bindings = { DB: D1Database }
 const app = new Hono<{ Bindings: Bindings }>()
-
 app.use('/api/*', cors())
 
-// ==================== AUTH HELPERS ====================
-async function hashPassword(password: string): Promise<string> {
-  const encoder = new TextEncoder()
-  const data = encoder.encode(password + 'prepmaster_salt_2024')
-  const hash = await crypto.subtle.digest('SHA-256', data)
-  return btoa(String.fromCharCode(...new Uint8Array(hash)))
+// ==================== HELPERS ====================
+async function hashPassword(p: string) {
+  const d = new TextEncoder().encode(p + 'prepmaster_salt_2024')
+  const h = await crypto.subtle.digest('SHA-256', d)
+  return btoa(String.fromCharCode(...new Uint8Array(h)))
+}
+async function genId() {
+  const a = new Uint8Array(32); crypto.getRandomValues(a)
+  return Array.from(a).map(b => b.toString(16).padStart(2,'0')).join('')
+}
+async function genCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  const a = new Uint8Array(8); crypto.getRandomValues(a)
+  return Array.from(a).map(b => chars[b % chars.length]).join('').replace(/(.{4})/g,'$1-').slice(0,-1)
+}
+async function getUser(c: any) {
+  const sid = getCookie(c, 'session_id'); if (!sid) return null
+  return c.env.DB.prepare(`SELECT s.user_id,u.name,u.email,u.role FROM auth_sessions s JOIN users u ON s.user_id=u.id WHERE s.id=? AND s.expires_at>datetime('now')`).bind(sid).first()
 }
 
-async function generateSessionId(): Promise<string> {
-  const array = new Uint8Array(32)
-  crypto.getRandomValues(array)
-  return Array.from(array).map(b => b.toString(16).padStart(2, '0')).join('')
-}
+// ==================== COURSES DATA ====================
+const COURSES = [
+  { code:'IELTS_FULL',    name:'IELTS Academic – Full Course',    name_ar:'أيلتس أكاديمي – الكورس الكامل',   exam_type:'IELTS',       module:null,        price:150, icon:'fa-globe',       color:'#0ea5e9', desc_ar:'تدريب شامل على جميع أقسام الأيلتس: Reading، Writing، Listening، Speaking مع محاكاة كاملة للاختبار الحقيقي.' },
+  { code:'IELTS_READ',    name:'IELTS Reading',                   name_ar:'أيلتس – قسم القراءة',              exam_type:'IELTS',       module:'reading',   price:50,  icon:'fa-book-open',   color:'#0ea5e9', desc_ar:'تدريب متخصص على استراتيجيات القراءة والفهم للأيلتس.' },
+  { code:'IELTS_WRITE',   name:'IELTS Writing',                   name_ar:'أيلتس – قسم الكتابة',             exam_type:'IELTS',       module:'writing',   price:50,  icon:'fa-pen-nib',     color:'#0ea5e9', desc_ar:'Task 1 و Task 2 مع نماذج احترافية وتصحيح مفصّل.' },
+  { code:'IELTS_LISTEN',  name:'IELTS Listening',                 name_ar:'أيلتس – قسم الاستماع',            exam_type:'IELTS',       module:'listening', price:50,  icon:'fa-headphones',  color:'#0ea5e9', desc_ar:'تدريب على الأقسام الأربعة مع استراتيجيات ملء الفراغات والإجابات.' },
+  { code:'IELTS_SPEAK',   name:'IELTS Speaking',                  name_ar:'أيلتس – قسم التحدث',              exam_type:'IELTS',       module:'speaking',  price:50,  icon:'fa-microphone',  color:'#0ea5e9', desc_ar:'محادثات فردية وتدريب على الأجزاء الثلاثة مع تغذية راجعة فورية.' },
+  { code:'TOEFL_FULL',   name:'TOEFL iBT – Full Course',         name_ar:'تويفل iBT – الكورس الكامل',       exam_type:'TOEFL',       module:null,        price:180, icon:'fa-university',  color:'#ef4444', desc_ar:'تدريب كامل على جميع أقسام التوفل مع اختبارات محاكاة وتصحيح مفصّل.' },
+  { code:'TOEFL_READ',   name:'TOEFL Reading',                   name_ar:'تويفل – قسم القراءة',             exam_type:'TOEFL',       module:'reading',   price:70,  icon:'fa-book-open',   color:'#ef4444', desc_ar:'استراتيجيات متقدمة للنصوص الأكاديمية وأنواع الأسئلة الـ 10.' },
+  { code:'TOEFL_WRITE',  name:'TOEFL Writing',                   name_ar:'تويفل – قسم الكتابة',            exam_type:'TOEFL',       module:'writing',   price:70,  icon:'fa-pen-nib',     color:'#ef4444', desc_ar:'Integrated Task و Independent Task بنماذج عالية الدرجات.' },
+  { code:'TOEFL_LISTEN', name:'TOEFL Listening',                 name_ar:'تويفل – قسم الاستماع',           exam_type:'TOEFL',       module:'listening', price:70,  icon:'fa-headphones',  color:'#ef4444', desc_ar:'محاضرات وحوارات أكاديمية مع تدريب على جميع أنواع الأسئلة.' },
+  { code:'TOEFL_SPEAK',  name:'TOEFL Speaking',                  name_ar:'تويفل – قسم التحدث',             exam_type:'TOEFL',       module:'speaking',  price:70,  icon:'fa-microphone',  color:'#ef4444', desc_ar:'4 مهام تحدث مع تدريب على الوقت والتفصيل والنطق الصحيح.' },
+  { code:'FOUNDATIONS',  name:'English Foundations',             name_ar:'مسار التأسيس اللغوي',             exam_type:'FOUNDATIONS', module:null,        price:150, icon:'fa-layer-group',  color:'#8b5cf6', desc_ar:'برنامج شامل لبناء قواعد اللغة الإنجليزية من الصفر للوصول لمستوى B2+.' },
+  { code:'PRIVATE_VIP',  name:'Private VIP – 20 Hours',         name_ar:'المسار الخاص VIP – 20 ساعة',      exam_type:'PRIVATE',     module:null,        price:400, icon:'fa-crown',        color:'#f59e0b', desc_ar:'20 ساعة تدريب خاص مع المدرب مباشرة، مرونة في الجدول، تدريس مخصص 100% لاحتياجاتك.' },
+]
 
-async function getUser(c: any): Promise<any | null> {
-  const sessionId = getCookie(c, 'session_id')
-  if (!sessionId) return null
-  const session = await c.env.DB.prepare(
-    `SELECT s.user_id, u.name, u.email, u.role 
-     FROM auth_sessions s JOIN users u ON s.user_id = u.id 
-     WHERE s.id = ? AND s.expires_at > datetime('now')`
-  ).bind(sessionId).first()
-  return session
-}
+// ==================== LAYOUT ====================
+const L = (title: string, body: string, scripts = '') => `<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>${title} - The Yamen Guide</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet"/>
+<style>
+:root{--navy:#1a2b4a;--navy-dark:#0f1e35;--accent:#3b82f6;--gold:#f59e0b;--ielts:#0ea5e9;--toefl:#ef4444;--found:#8b5cf6;--vip:#f59e0b}
+*{box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#f8fafc;color:#1e293b}
+.navbar{background:var(--navy);padding:0 1.5rem;display:flex;align-items:center;justify-content:space-between;height:64px;position:sticky;top:0;z-index:100;box-shadow:0 2px 8px rgba(0,0,0,.2)}
+.brand{color:#fff;font-size:1.2rem;font-weight:700;text-decoration:none;display:flex;align-items:center;gap:.5rem}
+.brand .g{color:var(--gold)}
+.card{background:#fff;border-radius:.75rem;padding:1.5rem;box-shadow:0 1px 3px rgba(0,0,0,.08);border:1px solid #e2e8f0}
+.btn{padding:.6rem 1.4rem;border-radius:.5rem;font-weight:600;cursor:pointer;transition:all .2s;border:none;display:inline-flex;align-items:center;gap:.5rem;font-size:.9rem}
+.btn-primary{background:var(--accent);color:#fff}.btn-primary:hover{background:#2563eb;transform:translateY(-1px);box-shadow:0 4px 12px rgba(59,130,246,.4)}
+.btn-gold{background:var(--gold);color:#fff}.btn-gold:hover{background:#d97706}
+.btn-success{background:#10b981;color:#fff}.btn-success:hover{background:#059669}
+.btn-outline{background:#fff;color:var(--navy);border:2px solid #e2e8f0}.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+.btn-wa{background:#25d366;color:#fff}.btn-wa:hover{background:#128c7e}
+.sidebar{background:var(--navy);width:240px;min-height:calc(100vh - 64px);flex-shrink:0}
+.sidebar a{display:flex;align-items:center;gap:.75rem;padding:.75rem 1.5rem;color:#94a3b8;text-decoration:none;transition:all .2s;font-size:.9rem}
+.sidebar a:hover,.sidebar a.active{background:rgba(255,255,255,.1);color:#fff}
+.sidebar a.active{border-right:3px solid var(--gold)}
+.course-card{border:2px solid transparent;transition:all .25s;cursor:pointer;position:relative}
+.course-card:hover{transform:translateY(-3px);box-shadow:0 8px 24px rgba(0,0,0,.12)}
+.course-card.locked{opacity:.7;filter:grayscale(.6)}
+.course-card.unlocked{border-color:currentColor}
+.lock-badge{position:absolute;top:.75rem;left:.75rem;background:rgba(0,0,0,.5);color:#fff;border-radius:9999px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:.75rem}
+.unlock-badge{position:absolute;top:.75rem;left:.75rem;background:#10b981;color:#fff;border-radius:9999px;width:28px;height:28px;display:flex;align-items:center;justify-content:center;font-size:.75rem}
+.hours-ring{position:relative;display:inline-flex;align-items:center;justify-content:center}
+.price-tag{font-size:1.5rem;font-weight:800}
+.badge{padding:.2rem .6rem;border-radius:9999px;font-size:.72rem;font-weight:700}
+.badge-ielts{background:#dbeafe;color:#1e40af}
+.badge-toefl{background:#fee2e2;color:#991b1b}
+.badge-found{background:#ede9fe;color:#5b21b6}
+.badge-vip{background:#fef3c7;color:#92400e}
+.qr-box{border:3px solid;border-radius:.75rem;padding:1rem;text-align:center}
+.input{width:100%;border:2px solid #e2e8f0;border-radius:.5rem;padding:.75rem 1rem;font-size:1rem;transition:border-color .2s;background:#fff}
+.input:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.1)}
+.tab-btn{padding:.5rem 1.25rem;border-radius:.5rem;font-weight:600;cursor:pointer;transition:all .2s;border:none;background:transparent;color:#64748b}
+.tab-btn.active{background:var(--navy);color:#fff}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.pulse{animation:pulse 2s infinite}
+@media(max-width:768px){.sidebar{display:none}.sidebar.open{display:block;position:fixed;top:64px;left:0;bottom:0;z-index:99;width:240px}}
+</style>
+</head>
+<body>${body}${scripts}</body>
+</html>`
 
 // ==================== AUTH ROUTES ====================
 app.post('/api/auth/register', async (c) => {
   const { name, email, password } = await c.req.json()
-  if (!name || !email || !password) return c.json({ error: 'All fields required' }, 400)
-  if (password.length < 6) return c.json({ error: 'Password must be at least 6 characters' }, 400)
-
-  const existing = await c.env.DB.prepare('SELECT id FROM users WHERE email = ?').bind(email).first()
-  if (existing) return c.json({ error: 'Email already registered' }, 409)
-
+  if (!name || !email || !password) return c.json({ error: 'جميع الحقول مطلوبة' }, 400)
+  if (password.length < 6) return c.json({ error: 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' }, 400)
+  const ex = await c.env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first()
+  if (ex) return c.json({ error: 'الإيميل مسجّل مسبقاً' }, 409)
   const hash = await hashPassword(password)
-  const result = await c.env.DB.prepare(
-    'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)'
-  ).bind(name, email, hash, 'student').run()
-
-  const sessionId = await generateSessionId()
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-  await c.env.DB.prepare(
-    'INSERT INTO auth_sessions (id, user_id, expires_at) VALUES (?, ?, ?)'
-  ).bind(sessionId, result.meta.last_row_id, expiresAt).run()
-
-  setCookie(c, 'session_id', sessionId, { httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 604800, path: '/' })
+  const r = await c.env.DB.prepare('INSERT INTO users (name,email,password_hash,role) VALUES (?,?,?,?)').bind(name, email, hash, 'student').run()
+  const sid = await genId()
+  const exp = new Date(Date.now() + 7*24*60*60*1000).toISOString()
+  await c.env.DB.prepare('INSERT INTO auth_sessions (id,user_id,expires_at) VALUES (?,?,?)').bind(sid, r.meta.last_row_id, exp).run()
+  setCookie(c, 'session_id', sid, { httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 604800, path: '/' })
   return c.json({ success: true, user: { name, email, role: 'student' } })
 })
 
 app.post('/api/auth/login', async (c) => {
   const { email, password } = await c.req.json()
-  if (!email || !password) return c.json({ error: 'Email and password required' }, 400)
-
-  const user = await c.env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first() as any
-  if (!user) return c.json({ error: 'Invalid credentials' }, 401)
-
+  if (!email || !password) return c.json({ error: 'الإيميل وكلمة المرور مطلوبان' }, 400)
+  const user: any = await c.env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first()
+  if (!user) return c.json({ error: 'بيانات غير صحيحة' }, 401)
   const hash = await hashPassword(password)
-  if (hash !== user.password_hash) return c.json({ error: 'Invalid credentials' }, 401)
-
-  await c.env.DB.prepare("UPDATE users SET last_login = datetime('now') WHERE id = ?").bind(user.id).run()
-
-  const sessionId = await generateSessionId()
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString()
-  await c.env.DB.prepare(
-    'INSERT INTO auth_sessions (id, user_id, expires_at) VALUES (?, ?, ?)'
-  ).bind(sessionId, user.id, expiresAt).run()
-
-  setCookie(c, 'session_id', sessionId, { httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 604800, path: '/' })
+  if (hash !== user.password_hash) return c.json({ error: 'بيانات غير صحيحة' }, 401)
+  await c.env.DB.prepare("UPDATE users SET last_login=datetime('now') WHERE id=?").bind(user.id).run()
+  const sid = await genId()
+  const exp = new Date(Date.now() + 7*24*60*60*1000).toISOString()
+  await c.env.DB.prepare('INSERT INTO auth_sessions (id,user_id,expires_at) VALUES (?,?,?)').bind(sid, user.id, exp).run()
+  setCookie(c, 'session_id', sid, { httpOnly: true, secure: true, sameSite: 'Lax', maxAge: 604800, path: '/' })
   return c.json({ success: true, user: { name: user.name, email: user.email, role: user.role } })
 })
 
 app.post('/api/auth/logout', async (c) => {
-  const sessionId = getCookie(c, 'session_id')
-  if (sessionId) {
-    await c.env.DB.prepare('DELETE FROM auth_sessions WHERE id = ?').bind(sessionId).run()
-  }
+  const sid = getCookie(c, 'session_id')
+  if (sid) await c.env.DB.prepare('DELETE FROM auth_sessions WHERE id=?').bind(sid).run()
   deleteCookie(c, 'session_id', { path: '/' })
   return c.json({ success: true })
 })
 
 app.get('/api/auth/me', async (c) => {
   const user = await getUser(c)
-  if (!user) return c.json({ user: null })
   return c.json({ user })
 })
 
-// ==================== QUESTIONS ROUTES ====================
-app.get('/api/questions', async (c) => {
-  const user = await getUser(c)
-  if (!user) return c.json({ error: 'Unauthorized' }, 401)
-
-  const examType = c.req.query('exam_type') || 'TOEFL'
-  const module = c.req.query('module') || 'reading'
-  const limit = parseInt(c.req.query('limit') || '10')
-
-  const questions = await c.env.DB.prepare(
-    'SELECT id, title, content, passage, options, question_type, difficulty, time_limit, points FROM questions WHERE exam_type = ? AND module = ? AND is_active = 1 LIMIT ?'
-  ).bind(examType, module, limit).all()
-
-  return c.json({ questions: questions.results })
+// ==================== COURSES API ====================
+app.get('/api/courses', async (c) => {
+  const courses = await c.env.DB.prepare('SELECT * FROM courses WHERE is_active=1 ORDER BY id').all()
+  return c.json({ courses: courses.results })
 })
 
-app.get('/api/questions/:id', async (c) => {
+// ==================== ENROLLMENTS API ====================
+app.get('/api/my-courses', async (c) => {
   const user = await getUser(c)
   if (!user) return c.json({ error: 'Unauthorized' }, 401)
-  const q = await c.env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(c.req.param('id')).first()
-  if (!q) return c.json({ error: 'Not found' }, 404)
-  return c.json({ question: q })
+  const enrollments = await c.env.DB.prepare(
+    `SELECT e.*,co.code,co.name,co.name_ar,co.exam_type,co.module,co.color,co.icon,co.price,
+     ph.total_hours,ph.used_hours,ph.remaining_hours
+     FROM enrollments e
+     JOIN courses co ON e.course_id=co.id
+     LEFT JOIN private_hours ph ON ph.enrollment_id=e.id
+     WHERE e.user_id=? AND e.is_active=1`
+  ).bind(user.user_id).all()
+  return c.json({ enrollments: enrollments.results })
 })
 
-// ==================== SESSIONS ROUTES ====================
-app.post('/api/sessions/start', async (c) => {
+// ==================== ACTIVATION API ====================
+app.post('/api/activate', async (c) => {
   const user = await getUser(c)
   if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  const { code } = await c.req.json()
+  if (!code) return c.json({ error: 'الكود مطلوب' }, 400)
 
-  const { exam_type, module } = await c.req.json()
-  const result = await c.env.DB.prepare(
-    "INSERT INTO practice_sessions (user_id, exam_type, module) VALUES (?, ?, ?)"
-  ).bind(user.user_id, exam_type, module).run()
+  const activation: any = await c.env.DB.prepare(
+    `SELECT ac.*,co.name_ar,co.exam_type,co.module,co.id as cid,co.code as course_code
+     FROM activation_codes ac JOIN courses co ON ac.course_id=co.id
+     WHERE ac.code=? AND ac.is_used=0`
+  ).bind(code.trim().toUpperCase()).first()
 
-  return c.json({ session_id: result.meta.last_row_id })
-})
+  if (!activation) return c.json({ error: 'الكود غير صحيح أو تم استخدامه مسبقاً' }, 404)
 
-app.post('/api/sessions/:id/answer', async (c) => {
-  const user = await getUser(c)
-  if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  // Check if already enrolled
+  const existing = await c.env.DB.prepare(
+    'SELECT id FROM enrollments WHERE user_id=? AND course_id=?'
+  ).bind(user.user_id, activation.cid).first()
+  if (existing) return c.json({ error: 'أنت مسجّل في هذا المسار مسبقاً' }, 409)
 
-  const { question_id, answer, time_spent } = await c.req.json()
-  const sessionId = c.req.param('id')
+  // Mark code as used
+  await c.env.DB.prepare(
+    "UPDATE activation_codes SET is_used=1,used_by=?,used_at=datetime('now') WHERE id=?"
+  ).bind(user.user_id, activation.id).run()
 
-  const question = await c.env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(question_id).first() as any
-  if (!question) return c.json({ error: 'Question not found' }, 404)
+  // Create enrollment
+  const exp = new Date(Date.now() + 365*24*60*60*1000).toISOString()
+  const enr = await c.env.DB.prepare(
+    'INSERT INTO enrollments (user_id,course_id,activation_code_id,expires_at) VALUES (?,?,?,?)'
+  ).bind(user.user_id, activation.cid, activation.id, exp).run()
 
-  let isCorrect = null
-  let pointsEarned = 0
-
-  if (question.correct_answer) {
-    isCorrect = answer === question.correct_answer ? 1 : 0
-    pointsEarned = isCorrect ? (question.points || 1.0) : 0
+  // If private VIP, create hours record
+  if (activation.course_code === 'PRIVATE_VIP') {
+    await c.env.DB.prepare(
+      'INSERT INTO private_hours (user_id,enrollment_id,total_hours,used_hours,remaining_hours) VALUES (?,?,20,0,20)'
+    ).bind(user.user_id, enr.meta.last_row_id).run()
   }
-
-  await c.env.DB.prepare(
-    'INSERT INTO session_answers (session_id, question_id, user_answer, is_correct, points_earned, time_spent) VALUES (?, ?, ?, ?, ?, ?)'
-  ).bind(sessionId, question_id, answer, isCorrect, pointsEarned, time_spent).run()
-
-  return c.json({ 
-    is_correct: isCorrect,
-    points_earned: pointsEarned,
-    correct_answer: question.correct_answer,
-    explanation: question.explanation
-  })
-})
-
-app.post('/api/sessions/:id/complete', async (c) => {
-  const user = await getUser(c)
-  if (!user) return c.json({ error: 'Unauthorized' }, 401)
-
-  const sessionId = c.req.param('id')
-  const { time_taken } = await c.req.json()
-
-  const answers = await c.env.DB.prepare(
-    'SELECT SUM(points_earned) as total_score, COUNT(*) as total_questions FROM session_answers WHERE session_id = ?'
-  ).bind(sessionId).first() as any
-
-  const questionsInfo = await c.env.DB.prepare(
-    `SELECT SUM(q.points) as max_score FROM session_answers sa 
-     JOIN questions q ON sa.question_id = q.id WHERE sa.session_id = ?`
-  ).bind(sessionId).first() as any
-
-  const score = answers?.total_score || 0
-  const maxScore = questionsInfo?.max_score || 0
-
-  await c.env.DB.prepare(
-    "UPDATE practice_sessions SET score = ?, max_score = ?, time_taken = ?, completed = 1, completed_at = datetime('now') WHERE id = ?"
-  ).bind(score, maxScore, time_taken, sessionId).run()
-
-  return c.json({ success: true, score, max_score: maxScore })
-})
-
-// ==================== DASHBOARD / STATS ROUTES ====================
-app.get('/api/dashboard/stats', async (c) => {
-  const user = await getUser(c)
-  if (!user) return c.json({ error: 'Unauthorized' }, 401)
-
-  const totalSessions = await c.env.DB.prepare(
-    'SELECT COUNT(*) as count FROM practice_sessions WHERE user_id = ? AND completed = 1'
-  ).bind(user.user_id).first() as any
-
-  const avgScore = await c.env.DB.prepare(
-    'SELECT AVG(CASE WHEN max_score > 0 THEN (score / max_score) * 100 ELSE 0 END) as avg FROM practice_sessions WHERE user_id = ? AND completed = 1'
-  ).bind(user.user_id).first() as any
-
-  const moduleStats = await c.env.DB.prepare(
-    `SELECT module, exam_type, COUNT(*) as sessions, 
-     AVG(CASE WHEN max_score > 0 THEN (score / max_score) * 100 ELSE 0 END) as avg_score
-     FROM practice_sessions WHERE user_id = ? AND completed = 1
-     GROUP BY module, exam_type`
-  ).bind(user.user_id).all()
-
-  const recentSessions = await c.env.DB.prepare(
-    `SELECT id, exam_type, module, score, max_score, time_taken, completed_at 
-     FROM practice_sessions WHERE user_id = ? AND completed = 1 
-     ORDER BY completed_at DESC LIMIT 5`
-  ).bind(user.user_id).all()
-
-  const streakData = await c.env.DB.prepare(
-    `SELECT DATE(completed_at) as date FROM practice_sessions 
-     WHERE user_id = ? AND completed = 1 
-     GROUP BY DATE(completed_at) ORDER BY date DESC LIMIT 7`
-  ).bind(user.user_id).all()
 
   return c.json({
-    total_sessions: totalSessions?.count || 0,
-    avg_score: Math.round(avgScore?.avg || 0),
-    module_stats: moduleStats.results,
-    recent_sessions: recentSessions.results,
-    streak_days: streakData.results.length
+    success: true,
+    course_name: activation.name_ar,
+    welcome_message: getWelcomeMessage(activation.course_code || '', activation.name_ar)
   })
 })
 
-// ==================== ADMIN ROUTES ====================
-app.get('/api/admin/users', async (c) => {
-  const user = await getUser(c)
-  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-  const users = await c.env.DB.prepare(
-    `SELECT u.id, u.name, u.email, u.role, u.created_at, u.last_login,
-     COUNT(ps.id) as total_sessions
-     FROM users u LEFT JOIN practice_sessions ps ON u.id = ps.user_id AND ps.completed = 1
-     GROUP BY u.id ORDER BY u.created_at DESC`
-  ).all()
-  return c.json({ users: users.results })
-})
-
-app.get('/api/admin/questions', async (c) => {
-  const user = await getUser(c)
-  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-  const questions = await c.env.DB.prepare(
-    'SELECT id, exam_type, module, question_type, difficulty, title, is_active, created_at FROM questions ORDER BY created_at DESC'
-  ).all()
-  return c.json({ questions: questions.results })
-})
-
-app.post('/api/admin/questions', async (c) => {
-  const user = await getUser(c)
-  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-  const body = await c.req.json()
-  const { exam_type, module, question_type, difficulty, title, content, passage, options, correct_answer, explanation, time_limit, points } = body
-
-  if (!exam_type || !module || !title || !content) {
-    return c.json({ error: 'Required fields missing' }, 400)
+function getWelcomeMessage(courseCode: string, courseName: string): string {
+  const msgs: Record<string, string> = {
+    IELTS_FULL: `🎉 أهلاً بك في مسار الأيلتس الكامل!\n\nلقد تم تفعيل وصولك إلى جميع أقسام الأيلتس.\n\n📌 كيف تبدأ:\n1️⃣ اذهب إلى لوحة التحكم وستجد جميع الأقسام مفتوحة\n2️⃣ ابدأ بقسم Reading ثم Listening\n3️⃣ لكل قسم اختبارات تدريبية مع تغذية راجعة فورية\n4️⃣ تواصل مع المدرب عبر الواتساب للجدولة\n\n🎯 هدفنا معك: Band 7+`,
+    IELTS_READ: `🎉 تم تفعيل مسار IELTS Reading!\n\n📌 ابدأ الآن:\n1️⃣ افتح قسم Reading من لوحة التحكم\n2️⃣ حل اختبارات تدريبية مع التوقيت\n3️⃣ راجع الأخطاء وتعلم من الشرح`,
+    IELTS_WRITE: `🎉 تم تفعيل مسار IELTS Writing!\n\n📌 ابدأ الآن:\n1️⃣ Task 1: وصف الرسوم البيانية\n2️⃣ Task 2: كتابة المقالات\n3️⃣ أرسل إجاباتك للمدرب للتصحيح`,
+    IELTS_LISTEN: `🎉 تم تفعيل مسار IELTS Listening!\n\n📌 ابدأ الآن:\n1️⃣ تدرب على الأقسام الأربعة بالترتيب\n2️⃣ استخدم الاستراتيجيات المُعطاة\n3️⃣ راجع الأخطاء فوراً بعد كل اختبار`,
+    IELTS_SPEAK: `🎉 تم تفعيل مسار IELTS Speaking!\n\n📌 ابدأ الآن:\n1️⃣ Part 1: أسئلة شخصية\n2️⃣ Part 2: Long Turn\n3️⃣ Part 3: نقاش\n4️⃣ سجّل نفسك وأرسل للمدرب للتقييم`,
+    TOEFL_FULL: `🎉 أهلاً بك في مسار التوفل الكامل!\n\n📌 كيف تبدأ:\n1️⃣ ابدأ بقسم Reading لبناء الأساس\n2️⃣ انتقل لـ Listening ثم Speaking ثم Writing\n3️⃣ حل اختبارات كاملة محاكاة للاختبار الحقيقي\n\n🎯 هدفنا معك: Score 100+`,
+    TOEFL_READ: `🎉 تم تفعيل TOEFL Reading!\n\n📌 ابدأ بـ:\n1️⃣ استراتيجيات القراءة السريعة\n2️⃣ أنواع الأسئلة الـ 10\n3️⃣ تدرّب على نصوص أكاديمية حقيقية`,
+    TOEFL_WRITE: `🎉 تم تفعيل TOEFL Writing!\n\n📌 ابدأ بـ:\n1️⃣ Integrated Task: ربط القراءة بالمحاضرة\n2️⃣ Independent Task: الكتابة الحرة\n3️⃣ نماذج بدرجات 4/5 مع الشرح`,
+    TOEFL_LISTEN: `🎉 تم تفعيل TOEFL Listening!\n\n📌 ابدأ بـ:\n1️⃣ محاضرات أكاديمية\n2️⃣ حوارات مكتبية وصفية\n3️⃣ تدرب على أخذ الملاحظات`,
+    TOEFL_SPEAK: `🎉 تم تفعيل TOEFL Speaking!\n\n📌 المهام الـ 4:\n1️⃣ Task 1: Independent\n2️⃣ Tasks 2-4: Integrated\n3️⃣ تدرب على الـ Template لكل مهمة`,
+    FOUNDATIONS: `🎉 أهلاً بك في مسار التأسيس اللغوي!\n\n📌 مسارك:\n1️⃣ Grammar & Vocabulary الأساسية\n2️⃣ Reading & Comprehension\n3️⃣ Basic Writing Skills\n4️⃣ Conversation Basics\n\n🎯 من المستوى A2 إلى B2+`,
+    PRIVATE_VIP: `👑 أهلاً بك في المسار الخاص VIP!\n\n✅ لديك 20 ساعة تدريب خاص مع المدرب\n\n📌 الخطوات التالية:\n1️⃣ تواصل مع المدرب على الواتساب لتحديد الجدول\n2️⃣ ستظهر لك ساعاتك في لوحة التحكم\n3️⃣ يتم خصم كل حصة بعد انتهائها\n\n📞 واتساب المدرب: 0798919150`,
   }
+  return msgs[courseCode] || `🎉 تم تفعيل ${courseName} بنجاح! اذهب إلى لوحة التحكم لتبدأ.`
+}
 
-  const result = await c.env.DB.prepare(
-    `INSERT INTO questions (exam_type, module, question_type, difficulty, title, content, passage, options, correct_answer, explanation, time_limit, points, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(exam_type, module, question_type || 'multiple_choice', difficulty || 'medium', title, content,
-    passage || null, options ? JSON.stringify(options) : null, correct_answer || null,
-    explanation || null, time_limit || 600, points || 1.0, user.user_id).run()
-
-  return c.json({ success: true, id: result.meta.last_row_id })
-})
-
-app.put('/api/admin/questions/:id', async (c) => {
+// ==================== PAYMENT REQUEST API ====================
+app.post('/api/payment-request', async (c) => {
   const user = await getUser(c)
-  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-  const body = await c.req.json()
-  const { title, content, passage, options, correct_answer, explanation, difficulty, is_active } = body
-
-  await c.env.DB.prepare(
-    `UPDATE questions SET title=?, content=?, passage=?, options=?, correct_answer=?, explanation=?, difficulty=?, is_active=? WHERE id=?`
-  ).bind(title, content, passage || null,
-    options ? (typeof options === 'string' ? options : JSON.stringify(options)) : null,
-    correct_answer || null, explanation || null, difficulty || 'medium',
-    is_active !== undefined ? is_active : 1, c.req.param('id')).run()
-
+  const { course_code, payment_method } = await c.req.json()
+  const course: any = await c.env.DB.prepare('SELECT * FROM courses WHERE code=?').bind(course_code).first()
+  if (!course) return c.json({ error: 'Course not found' }, 404)
+  const uid = user ? user.user_id : null
+  await c.env.DB.prepare('INSERT INTO payment_requests (user_id,course_id,amount,payment_method) VALUES (?,?,?,?)').bind(uid, course.id, course.price, payment_method).run()
   return c.json({ success: true })
 })
 
-app.delete('/api/admin/questions/:id', async (c) => {
+// ==================== ADMIN: GENERATE CODE ====================
+app.post('/api/admin/generate-code', async (c) => {
   const user = await getUser(c)
   if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const { course_code, notes } = await c.req.json()
+  const course: any = await c.env.DB.prepare('SELECT id FROM courses WHERE code=?').bind(course_code).first()
+  if (!course) return c.json({ error: 'Course not found' }, 404)
+  const code = await genCode()
+  await c.env.DB.prepare('INSERT INTO activation_codes (code,course_id,created_by,notes) VALUES (?,?,?,?)').bind(code, course.id, user.user_id, notes || '').run()
+  return c.json({ success: true, code })
+})
 
-  await c.env.DB.prepare('UPDATE questions SET is_active = 0 WHERE id = ?').bind(c.req.param('id')).run()
-  return c.json({ success: true })
+app.get('/api/admin/codes', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const codes = await c.env.DB.prepare(
+    `SELECT ac.*,co.name_ar,co.price,u.name as used_by_name FROM activation_codes ac
+     JOIN courses co ON ac.course_id=co.id
+     LEFT JOIN users u ON ac.used_by=u.id
+     ORDER BY ac.created_at DESC LIMIT 100`
+  ).all()
+  return c.json({ codes: codes.results })
+})
+
+app.get('/api/admin/enrollments', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const data = await c.env.DB.prepare(
+    `SELECT e.*,u.name as student_name,u.email,co.name_ar,co.price,
+     ph.total_hours,ph.used_hours,ph.remaining_hours
+     FROM enrollments e JOIN users u ON e.user_id=u.id
+     JOIN courses co ON e.course_id=co.id
+     LEFT JOIN private_hours ph ON ph.enrollment_id=e.id
+     ORDER BY e.activated_at DESC`
+  ).all()
+  return c.json({ enrollments: data.results })
+})
+
+app.post('/api/admin/log-hours', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const { user_id, hours, notes } = await c.req.json()
+  const ph: any = await c.env.DB.prepare('SELECT * FROM private_hours WHERE user_id=?').bind(user_id).first()
+  if (!ph) return c.json({ error: 'No private hours record found' }, 404)
+  const newUsed = ph.used_hours + hours
+  const newRemaining = Math.max(0, ph.remaining_hours - hours)
+  await c.env.DB.prepare("UPDATE private_hours SET used_hours=?,remaining_hours=?,last_session_at=datetime('now') WHERE id=?").bind(newUsed, newRemaining, ph.id).run()
+  await c.env.DB.prepare("INSERT INTO hours_sessions (user_id,private_hours_id,hours_used,notes,logged_by) VALUES (?,?,?,?,?)").bind(user_id, ph.id, hours, notes || '', user.user_id).run()
+  return c.json({ success: true, remaining: newRemaining })
 })
 
 app.get('/api/admin/stats', async (c) => {
   const user = await getUser(c)
   if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
-
-  const totalUsers = await c.env.DB.prepare("SELECT COUNT(*) as count FROM users WHERE role = 'student'").first() as any
-  const totalSessions = await c.env.DB.prepare("SELECT COUNT(*) as count FROM practice_sessions WHERE completed = 1").first() as any
-  const totalQuestions = await c.env.DB.prepare("SELECT COUNT(*) as count FROM questions WHERE is_active = 1").first() as any
-  const examBreakdown = await c.env.DB.prepare(
-    "SELECT exam_type, module, COUNT(*) as count FROM practice_sessions WHERE completed = 1 GROUP BY exam_type, module"
-  ).all()
-
-  return c.json({
-    total_users: totalUsers?.count || 0,
-    total_sessions: totalSessions?.count || 0,
-    total_questions: totalQuestions?.count || 0,
-    exam_breakdown: examBreakdown.results
-  })
+  const [students, enrollments, codes, payments] = await Promise.all([
+    c.env.DB.prepare("SELECT COUNT(*) as n FROM users WHERE role='student'").first() as any,
+    c.env.DB.prepare("SELECT COUNT(*) as n FROM enrollments WHERE is_active=1").first() as any,
+    c.env.DB.prepare("SELECT COUNT(*) as n FROM activation_codes WHERE is_used=0").first() as any,
+    c.env.DB.prepare("SELECT COUNT(*) as n FROM payment_requests").first() as any,
+  ])
+  const breakdown = await c.env.DB.prepare("SELECT co.name_ar,COUNT(e.id) as cnt FROM enrollments e JOIN courses co ON e.course_id=co.id GROUP BY co.id ORDER BY cnt DESC").all()
+  return c.json({ students: students?.n||0, enrollments: enrollments?.n||0, unused_codes: codes?.n||0, payment_requests: payments?.n||0, breakdown: breakdown.results })
 })
 
-// ==================== SETUP ROUTE (initialize DB) ====================
+app.get('/api/admin/users', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const users = await c.env.DB.prepare(
+    `SELECT u.*,COUNT(e.id) as enrollments FROM users u LEFT JOIN enrollments e ON u.id=e.user_id GROUP BY u.id ORDER BY u.created_at DESC`
+  ).all()
+  return c.json({ users: users.results })
+})
+
+// ==================== SETUP ====================
 app.get('/api/setup', async (c) => {
   try {
-    // Create tables using batch for D1 compatibility
     await c.env.DB.batch([
       c.env.DB.prepare("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'student', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, last_login DATETIME)"),
       c.env.DB.prepare("CREATE TABLE IF NOT EXISTS practice_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, exam_type TEXT NOT NULL, module TEXT NOT NULL, score REAL, max_score REAL, time_taken INTEGER, completed INTEGER DEFAULT 0, started_at DATETIME DEFAULT CURRENT_TIMESTAMP, completed_at DATETIME)"),
       c.env.DB.prepare("CREATE TABLE IF NOT EXISTS questions (id INTEGER PRIMARY KEY AUTOINCREMENT, exam_type TEXT NOT NULL, module TEXT NOT NULL, question_type TEXT NOT NULL, difficulty TEXT NOT NULL DEFAULT 'medium', title TEXT NOT NULL, content TEXT NOT NULL, passage TEXT, options TEXT, correct_answer TEXT, explanation TEXT, time_limit INTEGER, points REAL DEFAULT 1.0, is_active INTEGER DEFAULT 1, created_by INTEGER, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"),
       c.env.DB.prepare("CREATE TABLE IF NOT EXISTS session_answers (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id INTEGER NOT NULL, question_id INTEGER NOT NULL, user_answer TEXT, is_correct INTEGER, points_earned REAL DEFAULT 0, time_spent INTEGER, answered_at DATETIME DEFAULT CURRENT_TIMESTAMP)"),
       c.env.DB.prepare("CREATE TABLE IF NOT EXISTS auth_sessions (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at DATETIME NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"),
-      c.env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_ps_user ON practice_sessions(user_id)"),
-      c.env.DB.prepare("CREATE INDEX IF NOT EXISTS idx_q_exam ON questions(exam_type, module)"),
+      c.env.DB.prepare("CREATE TABLE IF NOT EXISTS courses (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, name_ar TEXT NOT NULL, exam_type TEXT, module TEXT, price REAL NOT NULL, original_price REAL, description TEXT, description_ar TEXT, hours INTEGER, is_active INTEGER DEFAULT 1, color TEXT DEFAULT '#3b82f6', icon TEXT DEFAULT 'fa-graduation-cap', created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"),
+      c.env.DB.prepare("CREATE TABLE IF NOT EXISTS activation_codes (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE NOT NULL, course_id INTEGER NOT NULL, created_by INTEGER, used_by INTEGER, used_at DATETIME, expires_at DATETIME, is_used INTEGER DEFAULT 0, notes TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"),
+      c.env.DB.prepare("CREATE TABLE IF NOT EXISTS enrollments (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, course_id INTEGER NOT NULL, activation_code_id INTEGER, activated_at DATETIME DEFAULT CURRENT_TIMESTAMP, expires_at DATETIME, is_active INTEGER DEFAULT 1, welcome_shown INTEGER DEFAULT 0)"),
+      c.env.DB.prepare("CREATE TABLE IF NOT EXISTS private_hours (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, enrollment_id INTEGER NOT NULL, total_hours INTEGER DEFAULT 20, used_hours REAL DEFAULT 0, remaining_hours REAL DEFAULT 20, last_session_at DATETIME)"),
+      c.env.DB.prepare("CREATE TABLE IF NOT EXISTS hours_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, private_hours_id INTEGER NOT NULL, hours_used REAL NOT NULL, session_date DATETIME DEFAULT CURRENT_TIMESTAMP, notes TEXT, logged_by INTEGER)"),
+      c.env.DB.prepare("CREATE TABLE IF NOT EXISTS payment_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, course_id INTEGER NOT NULL, amount REAL NOT NULL, payment_method TEXT, status TEXT DEFAULT 'pending', whatsapp_sent INTEGER DEFAULT 0, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)"),
     ])
-
-    // Create admin user
-    const adminHash = await hashPassword('Admin@123')
-    await c.env.DB.prepare("INSERT OR IGNORE INTO users (email, name, password_hash, role) VALUES (?, ?, ?, 'admin')")
-      .bind('admin@prepmaster.edu', 'Admin User', adminHash).run()
-
-    // Create demo student
-    const studentHash = await hashPassword('Student@123')
-    await c.env.DB.prepare("INSERT OR IGNORE INTO users (email, name, password_hash, role) VALUES (?, ?, ?, 'student')")
-      .bind('student@prepmaster.edu', 'Alex Johnson', studentHash).run()
-
-    return c.json({ success: true, message: 'Database initialized successfully' })
-  } catch (e: any) {
-    return c.json({ error: e.message }, 500)
-  }
-})
-
-app.get('/api/setup/seed', async (c) => {
-  try {
-    const questions = [
-      {
-        exam_type: 'TOEFL', module: 'reading', question_type: 'multiple_choice', difficulty: 'medium',
-        title: 'The Industrial Revolution',
-        content: 'According to the passage, what was the primary driver of the Industrial Revolution?',
-        passage: 'The Industrial Revolution, which began in Britain during the 18th century, fundamentally transformed human society. The shift from agrarian and handicraft economies to manufacturing and industry was driven primarily by technological innovations, particularly the development of steam power. James Watt\'s improvements to the steam engine in the 1760s allowed factories to be built anywhere, not just near water sources. This led to rapid urbanization as workers moved from rural areas to cities seeking employment. The social consequences were profound: a new middle class emerged, child labor became widespread, and traditional ways of life were permanently altered. The revolution eventually spread to Western Europe and North America, reshaping global trade patterns and establishing the foundations of modern capitalism.',
-        options: JSON.stringify(['Technological innovations, especially steam power', 'Availability of cheap labor', 'Colonial expansion and resource extraction', 'Government subsidies for manufacturing']),
-        correct_answer: 'Technological innovations, especially steam power',
-        explanation: 'The passage explicitly states the shift was "driven primarily by technological innovations, particularly the development of steam power."',
-        time_limit: 1200, points: 1.0
-      },
-      {
-        exam_type: 'TOEFL', module: 'reading', question_type: 'multiple_choice', difficulty: 'easy',
-        title: 'Photosynthesis Basics',
-        content: 'What is the main product of photosynthesis according to the passage?',
-        passage: 'Photosynthesis is the process by which green plants and some other organisms convert light energy, usually from the sun, into chemical energy that can be later released to fuel the organism\'s activities. This process involves the absorption of carbon dioxide and water, which are converted into glucose and oxygen. The reaction occurs primarily in the chloroplasts of plant cells, where chlorophyll—the green pigment—captures light energy. Glucose produced during photosynthesis serves as the primary energy source for the plant, while oxygen is released as a byproduct into the atmosphere. This oxygen release is what makes photosynthesis essential to life on Earth, as it maintains the atmospheric oxygen that most organisms need for respiration.',
-        options: JSON.stringify(['Glucose and oxygen', 'Carbon dioxide and water', 'Chlorophyll and light', 'Nitrogen and glucose']),
-        correct_answer: 'Glucose and oxygen',
-        explanation: 'The passage clearly states that carbon dioxide and water "are converted into glucose and oxygen."',
-        time_limit: 1200, points: 1.0
-      },
-      {
-        exam_type: 'TOEFL', module: 'reading', question_type: 'multiple_choice', difficulty: 'hard',
-        title: 'The Industrial Revolution - Inference',
-        content: 'What can be inferred from the passage about James Watt\'s steam engine?',
-        passage: 'The Industrial Revolution, which began in Britain during the 18th century, fundamentally transformed human society. The shift from agrarian and handicraft economies to manufacturing and industry was driven primarily by technological innovations, particularly the development of steam power. James Watt\'s improvements to the steam engine in the 1760s allowed factories to be built anywhere, not just near water sources. This led to rapid urbanization as workers moved from rural areas to cities seeking employment.',
-        options: JSON.stringify(['It made factory location more flexible', 'It was invented entirely by Watt', 'It was first used in agriculture', 'It required proximity to rivers']),
-        correct_answer: 'It made factory location more flexible',
-        explanation: 'The passage states factories could be "built anywhere, not just near water sources," implying location flexibility increased.',
-        time_limit: 1200, points: 1.0
-      },
-      {
-        exam_type: 'TOEFL', module: 'listening', question_type: 'multiple_choice', difficulty: 'medium',
-        title: 'Campus Conversation',
-        content: 'Listen to the following conversation between a student and a professor. What is the student\'s main concern?\n\n[Audio Transcript]\nStudent: "Professor Williams, I\'m worried about the upcoming midterm. I\'ve been studying but I feel like I don\'t fully understand the material on behavioral economics."\nProfessor: "That\'s understandable. The concepts can be challenging at first. What specific areas are you struggling with?"\nStudent: "Mainly the concept of loss aversion and how it differs from risk aversion."\nProfessor: "Good that you\'ve identified the problem. Loss aversion refers to the tendency to prefer avoiding losses over acquiring gains, while risk aversion is about preferring certainty over uncertainty."',
-        passage: null,
-        options: JSON.stringify(['Understanding behavioral economics concepts', 'Preparing for the final exam', 'Finding study materials', 'Getting an extension on an assignment']),
-        correct_answer: 'Understanding behavioral economics concepts',
-        explanation: 'The student explicitly states concern about understanding "the material on behavioral economics."',
-        time_limit: 600, points: 1.0
-      },
-      {
-        exam_type: 'TOEFL', module: 'listening', question_type: 'multiple_choice', difficulty: 'medium',
-        title: 'Academic Lecture - Climate',
-        content: 'What does the professor say about deforestation and climate change?\n\n[Audio Transcript]\nProfessor: "Today we\'re examining the interconnected nature of deforestation and climate change. Forests act as carbon sinks, absorbing significant amounts of CO2 from the atmosphere. When forests are cleared, not only do we lose this carbon-absorbing capacity, but the stored carbon is released back into the atmosphere. This creates what scientists call a double impact—reduced absorption combined with increased emissions. Studies show that deforestation accounts for approximately 10-15% of global greenhouse gas emissions annually."',
-        passage: null,
-        options: JSON.stringify(['Deforestation has a double negative impact on climate', 'Forests absorb more CO2 than previously thought', 'Climate change causes more deforestation', 'Deforestation occurs mainly in tropical regions']),
-        correct_answer: 'Deforestation has a double negative impact on climate',
-        explanation: 'The professor describes a "double impact"—reduced CO2 absorption plus increased emissions.',
-        time_limit: 600, points: 1.0
-      },
-      {
-        exam_type: 'TOEFL', module: 'writing', question_type: 'independent', difficulty: 'medium',
-        title: 'Technology in Education',
-        content: 'Do you agree or disagree with the following statement?\n\n"Technology has made it easier for students to learn compared to previous generations."\n\nUse specific reasons and examples to support your answer. Write at least 300 words.',
-        passage: null, options: null, correct_answer: null,
-        explanation: 'Evaluated on task response, coherence, vocabulary, and grammar.',
-        time_limit: 1800, points: 5.0
-      },
-      {
-        exam_type: 'TOEFL', module: 'speaking', question_type: 'independent', difficulty: 'medium',
-        title: 'Task 1 - Personal Preference',
-        content: 'Some people prefer to work in a team, while others prefer to work independently. Which do you prefer and why?\n\nPreparation time: 15 seconds | Response time: 45 seconds\n\nKey points to address:\n• State your preference clearly\n• Provide 2-3 specific reasons\n• Use examples from your experience',
-        passage: null, options: null, correct_answer: null,
-        explanation: 'Evaluated on delivery, language use, and topic development.',
-        time_limit: 60, points: 4.0
-      },
-      {
-        exam_type: 'IELTS', module: 'reading', question_type: 'multiple_choice', difficulty: 'medium',
-        title: 'The Psychology of Decision Making',
-        content: 'According to the passage, what is "cognitive bias"?',
-        passage: 'The Psychology of Decision Making\n\nHuman beings like to think of themselves as rational actors, making decisions based on careful analysis of available information. However, decades of research in behavioral psychology have revealed that our decision-making processes are frequently influenced by cognitive biases—systematic patterns of deviation from rationality in judgment. These biases often arise from the mental shortcuts, known as heuristics, that our brains use to simplify complex information processing.\n\nOne of the most well-documented cognitive biases is confirmation bias, the tendency to search for and interpret information in a way that confirms one\'s preexisting beliefs. Another common bias is the availability heuristic, where people judge the likelihood of events based on how easily examples come to mind.',
-        options: JSON.stringify(['Rational patterns of decision-making', 'Systematic deviations from rational judgment', 'Mental shortcuts that improve decisions', 'Statistical errors in data analysis']),
-        correct_answer: 'Systematic deviations from rational judgment',
-        explanation: 'The passage defines cognitive biases as "systematic patterns of deviation from rationality in judgment."',
-        time_limit: 1200, points: 1.0
-      },
-      {
-        exam_type: 'IELTS', module: 'writing', question_type: 'task2', difficulty: 'hard',
-        title: 'Task 2 - Opinion Essay',
-        content: 'Some people believe that universities should focus on providing academic knowledge and skills, while others think that universities should also prepare students for employment.\n\nDiscuss both views and give your own opinion.\n\nWrite at least 250 words.',
-        passage: null, options: null, correct_answer: null,
-        explanation: 'Evaluated on task achievement, coherence, vocabulary range, and grammatical accuracy.',
-        time_limit: 2400, points: 9.0
-      },
-      {
-        exam_type: 'IELTS', module: 'speaking', question_type: 'part2', difficulty: 'medium',
-        title: 'Part 2 - Long Turn',
-        content: 'Describe a time when you helped someone.\n\nYou should say:\n• Who you helped\n• How you helped them\n• Why they needed help\n• And explain how you felt after helping them\n\nPreparation time: 1 minute | Speaking time: 1-2 minutes',
-        passage: null, options: null, correct_answer: null,
-        explanation: 'Evaluated on fluency, vocabulary, grammar, and pronunciation.',
-        time_limit: 180, points: 4.0
-      },
-      {
-        exam_type: 'IELTS', module: 'listening', question_type: 'multiple_choice', difficulty: 'medium',
-        title: 'Section 1 - Booking a Tour',
-        content: 'Listen to a conversation between a travel agent and a customer.\n\n[Audio Transcript]\nAgent: "Good morning, Adventure Tours. How can I help you?"\nCustomer: "Hi, I\'d like to book a tour to Scotland for next month."\nAgent: "We have three options. The 3-day Highland tour costs £285 per person, the 5-day coastal tour is £420, and our premium 7-day full Scotland tour is £680."\nCustomer: "What does the 5-day tour include?"\nAgent: "It includes accommodation at 4-star hotels, all breakfasts and dinners, transport by coach, and guided visits to Edinburgh Castle, Loch Ness, and the Isle of Skye."\nCustomer: "That sounds perfect. I\'ll take two places on the 5-day tour."\n\nHow much will the customer pay in total?',
-        passage: null,
-        options: JSON.stringify(['£420', '£840', '£680', '£570']),
-        correct_answer: '£840',
-        explanation: 'The 5-day tour costs £420 per person. The customer is booking for 2 people: £420 × 2 = £840.',
-        time_limit: 600, points: 1.0
-      }
-    ]
-
-    for (const q of questions) {
-      await c.env.DB.prepare(
-        `INSERT OR IGNORE INTO questions (exam_type, module, question_type, difficulty, title, content, passage, options, correct_answer, explanation, time_limit, points, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
-      ).bind(q.exam_type, q.module, q.question_type, q.difficulty, q.title, q.content,
-        q.passage, q.options, q.correct_answer, q.explanation, q.time_limit, q.points).run()
+    // Seed admin (only if no admin exists)
+    const existAdmin: any = await c.env.DB.prepare("SELECT COUNT(*) as n FROM users WHERE role='admin'").first()
+    if (!existAdmin || existAdmin.n === 0) {
+      const ah = await hashPassword('Admin@123')
+      await c.env.DB.prepare("INSERT OR IGNORE INTO users (email,name,password_hash,role) VALUES (?,?,?,'admin')").bind('admin@prepmaster.edu','Admin User',ah).run()
     }
-
-    return c.json({ success: true, message: `Seeded ${questions.length} questions` })
-  } catch (e: any) {
-    return c.json({ error: e.message }, 500)
-  }
+    // Seed courses
+    for (const course of COURSES) {
+      await c.env.DB.prepare("INSERT OR IGNORE INTO courses (code,name,name_ar,exam_type,module,price,description_ar,icon,color) VALUES (?,?,?,?,?,?,?,?,?)").bind(course.code, course.name, course.name_ar, course.exam_type, course.module, course.price, course.desc_ar, course.icon, course.color).run()
+    }
+    return c.json({ success: true, message: 'Database initialized!' })
+  } catch (e: any) { return c.json({ error: e.message }, 500) }
 })
 
-// ==================== STATIC FILES ====================
-app.use('/static/*', serveStatic({ root: './' }))
-app.use('/public/*', serveStatic({ root: './' }))
+// Questions routes (kept from original)
+app.get('/api/questions', async (c) => {
+  const user = await getUser(c); if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  const { exam_type, module } = c.req.query()
+  const qs = await c.env.DB.prepare('SELECT id,title,content,passage,options,question_type,difficulty,time_limit,points FROM questions WHERE exam_type=? AND module=? AND is_active=1 LIMIT 10').bind(exam_type||'TOEFL', module||'reading').all()
+  return c.json({ questions: qs.results })
+})
+app.post('/api/sessions/start', async (c) => {
+  const user = await getUser(c); if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  const { exam_type, module } = await c.req.json()
+  const r = await c.env.DB.prepare("INSERT INTO practice_sessions (user_id,exam_type,module) VALUES (?,?,?)").bind(user.user_id, exam_type, module).run()
+  return c.json({ session_id: r.meta.last_row_id })
+})
+app.post('/api/sessions/:id/answer', async (c) => {
+  const user = await getUser(c); if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  const { question_id, answer, time_spent } = await c.req.json()
+  const q: any = await c.env.DB.prepare('SELECT * FROM questions WHERE id=?').bind(question_id).first()
+  if (!q) return c.json({ error: 'Not found' }, 404)
+  const isCorrect = q.correct_answer ? (answer === q.correct_answer ? 1 : 0) : null
+  const pts = isCorrect ? (q.points||1) : 0
+  await c.env.DB.prepare('INSERT INTO session_answers (session_id,question_id,user_answer,is_correct,points_earned,time_spent) VALUES (?,?,?,?,?,?)').bind(c.req.param('id'), question_id, answer, isCorrect, pts, time_spent).run()
+  return c.json({ is_correct: isCorrect, points_earned: pts, correct_answer: q.correct_answer, explanation: q.explanation })
+})
+app.post('/api/sessions/:id/complete', async (c) => {
+  const user = await getUser(c); if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  const { time_taken } = await c.req.json()
+  const ans: any = await c.env.DB.prepare('SELECT SUM(points_earned) as s FROM session_answers WHERE session_id=?').bind(c.req.param('id')).first()
+  const mx: any = await c.env.DB.prepare('SELECT SUM(q.points) as s FROM session_answers sa JOIN questions q ON sa.question_id=q.id WHERE sa.session_id=?').bind(c.req.param('id')).first()
+  await c.env.DB.prepare("UPDATE practice_sessions SET score=?,max_score=?,time_taken=?,completed=1,completed_at=datetime('now') WHERE id=?").bind(ans?.s||0, mx?.s||0, time_taken, c.req.param('id')).run()
+  return c.json({ success: true, score: ans?.s||0, max_score: mx?.s||0 })
+})
+app.get('/api/dashboard/stats', async (c) => {
+  const user = await getUser(c); if (!user) return c.json({ error: 'Unauthorized' }, 401)
+  const [tot, avg, rec] = await Promise.all([
+    c.env.DB.prepare("SELECT COUNT(*) as n FROM practice_sessions WHERE user_id=? AND completed=1").bind(user.user_id).first() as any,
+    c.env.DB.prepare("SELECT AVG(CASE WHEN max_score>0 THEN (score/max_score)*100 ELSE 0 END) as a FROM practice_sessions WHERE user_id=? AND completed=1").bind(user.user_id).first() as any,
+    c.env.DB.prepare("SELECT exam_type,module,score,max_score,completed_at FROM practice_sessions WHERE user_id=? AND completed=1 ORDER BY completed_at DESC LIMIT 5").bind(user.user_id).all(),
+  ])
+  return c.json({ total_sessions: tot?.n||0, avg_score: Math.round(avg?.a||0), recent_sessions: rec.results })
+})
 
-// Favicon
+// ==================== ADMIN: CREATE REAL ADMIN ====================
+app.post('/api/admin/create-admin', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const { name, email, password } = await c.req.json()
+  if (!name || !email || !password) return c.json({ error: 'جميع الحقول مطلوبة' }, 400)
+  if (password.length < 8) return c.json({ error: 'كلمة المرور 8 أحرف على الأقل' }, 400)
+  const ex = await c.env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first()
+  if (ex) return c.json({ error: 'الإيميل مسجّل مسبقاً' }, 409)
+  const hash = await hashPassword(password)
+  await c.env.DB.prepare("INSERT INTO users (email,name,password_hash,role) VALUES (?,?,?,'admin')").bind(email, name, hash).run()
+  return c.json({ success: true, message: 'تم إنشاء حساب الأدمن بنجاح' })
+})
+
+// ==================== ADMIN: CHANGE PASSWORD ====================
+app.post('/api/admin/change-password', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const { target_user_id, new_password } = await c.req.json()
+  if (!target_user_id || !new_password) return c.json({ error: 'البيانات مطلوبة' }, 400)
+  if (new_password.length < 6) return c.json({ error: 'كلمة المرور 6 أحرف على الأقل' }, 400)
+  const hash = await hashPassword(new_password)
+  await c.env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(hash, target_user_id).run()
+  return c.json({ success: true })
+})
+
+// ==================== ADMIN: PAYMENT REQUESTS ====================
+app.get('/api/admin/payment-requests', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  const data = await c.env.DB.prepare(
+    `SELECT pr.*,u.name as student_name,u.email,co.name_ar,co.price
+     FROM payment_requests pr
+     LEFT JOIN users u ON pr.user_id=u.id
+     JOIN courses co ON pr.course_id=co.id
+     ORDER BY pr.created_at DESC LIMIT 50`
+  ).all()
+  return c.json({ requests: data.results })
+})
+
+app.post('/api/admin/payment-requests/:id/approve', async (c) => {
+  const user = await getUser(c)
+  if (!user || user.role !== 'admin') return c.json({ error: 'Forbidden' }, 403)
+  await c.env.DB.prepare("UPDATE payment_requests SET status='approved' WHERE id=?").bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+// Admin questions
+app.post('/api/admin/questions', async (c) => {
+  const user = await getUser(c); if (!user||user.role!=='admin') return c.json({ error: 'Forbidden' }, 403)
+  const b = await c.req.json()
+  const r = await c.env.DB.prepare("INSERT INTO questions (exam_type,module,question_type,difficulty,title,content,passage,options,correct_answer,explanation,time_limit,points,created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)").bind(b.exam_type,b.module,b.question_type||'multiple_choice',b.difficulty||'medium',b.title,b.content,b.passage||null,b.options?JSON.stringify(b.options):null,b.correct_answer||null,b.explanation||null,b.time_limit||600,b.points||1.0,user.user_id).run()
+  return c.json({ success: true, id: r.meta.last_row_id })
+})
+app.get('/api/admin/questions', async (c) => {
+  const user = await getUser(c); if (!user||user.role!=='admin') return c.json({ error: 'Forbidden' }, 403)
+  const qs = await c.env.DB.prepare('SELECT id,exam_type,module,question_type,difficulty,title,is_active,created_at FROM questions ORDER BY created_at DESC').all()
+  return c.json({ questions: qs.results })
+})
+app.delete('/api/admin/questions/:id', async (c) => {
+  const user = await getUser(c); if (!user||user.role!=='admin') return c.json({ error: 'Forbidden' }, 403)
+  await c.env.DB.prepare('UPDATE questions SET is_active=0 WHERE id=?').bind(c.req.param('id')).run()
+  return c.json({ success: true })
+})
+
+// ==================== FAVICON ====================
 app.get('/favicon.svg', (c) => {
   const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="6" fill="#1a2b4a"/><text x="16" y="22" font-size="18" text-anchor="middle" fill="#f59e0b" font-family="Arial" font-weight="bold">Y</text></svg>'
-  return new Response(svg, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public, max-age=86400' } })
+  return new Response(svg, { headers: { 'Content-Type': 'image/svg+xml', 'Cache-Control': 'public,max-age=86400' } })
 })
 
-// ==================== FRONTEND PAGES ====================
-const getLayout = (title: string, body: string, scripts: string = '') => `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>${title} - The Yamen Guide</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg"/>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet"/>
-  <style>
-    :root {
-      --navy: #1a2b4a;
-      --navy-dark: #0f1e35;
-      --navy-light: #2d4470;
-      --accent: #3b82f6;
-      --accent-hover: #2563eb;
-      --gold: #f59e0b;
-      --success: #10b981;
-      --danger: #ef4444;
-      --grey-50: #f8fafc;
-      --grey-100: #f1f5f9;
-      --grey-200: #e2e8f0;
-      --grey-400: #94a3b8;
-      --grey-600: #475569;
-      --grey-800: #1e293b;
-    }
-    * { box-sizing: border-box; }
-    body { font-family: 'Segoe UI', system-ui, sans-serif; background: var(--grey-50); color: var(--grey-800); }
-    .btn-primary { background: var(--accent); color: white; padding: 0.625rem 1.5rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; transition: all 0.2s; border: none; display: inline-flex; align-items: center; gap: 0.5rem; }
-    .btn-primary:hover { background: var(--accent-hover); transform: translateY(-1px); box-shadow: 0 4px 12px rgba(59,130,246,0.4); }
-    .btn-secondary { background: white; color: var(--navy); padding: 0.625rem 1.5rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; transition: all 0.2s; border: 1px solid var(--grey-200); display: inline-flex; align-items: center; gap: 0.5rem; }
-    .btn-secondary:hover { background: var(--grey-100); border-color: var(--accent); color: var(--accent); }
-    .btn-danger { background: var(--danger); color: white; padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; transition: all 0.2s; border: none; }
-    .card { background: white; border-radius: 0.75rem; padding: 1.5rem; box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.06); border: 1px solid var(--grey-200); }
-    .navbar { background: var(--navy); padding: 0 1.5rem; display: flex; align-items: center; justify-content: space-between; height: 64px; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 8px rgba(0,0,0,0.2); }
-    .navbar-brand { color: white; font-size: 1.25rem; font-weight: 700; display: flex; align-items: center; gap: 0.5rem; text-decoration: none; }
-    .navbar-brand span.accent { color: var(--gold); }
-    .badge-toefl { background: #dbeafe; color: #1e40af; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .badge-ielts { background: #d1fae5; color: #065f46; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .badge-reading { background: #fef3c7; color: #92400e; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .badge-listening { background: #ede9fe; color: #5b21b6; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .badge-speaking { background: #fee2e2; color: #991b1b; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .badge-writing { background: #ecfdf5; color: #065f46; padding: 0.125rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
-    .timer-bar { background: linear-gradient(90deg, #10b981, #3b82f6); height: 4px; border-radius: 2px; transition: width 1s linear; }
-    .timer-warning { background: linear-gradient(90deg, #f59e0b, #ef4444); }
-    .module-card { border: 2px solid transparent; transition: all 0.2s; cursor: pointer; }
-    .module-card:hover { border-color: var(--accent); transform: translateY(-2px); box-shadow: 0 8px 24px rgba(59,130,246,0.15); }
-    .module-card.reading:hover { border-color: #f59e0b; }
-    .module-card.listening:hover { border-color: #8b5cf6; }
-    .module-card.speaking:hover { border-color: #ef4444; }
-    .module-card.writing:hover { border-color: #10b981; }
-    .progress-ring { transform: rotate(-90deg); }
-    .option-btn { width: 100%; text-align: left; padding: 0.875rem 1.25rem; border: 2px solid var(--grey-200); border-radius: 0.5rem; cursor: pointer; transition: all 0.2s; background: white; font-size: 0.95rem; display: flex; align-items: flex-start; gap: 0.75rem; }
-    .option-btn:hover { border-color: var(--accent); background: #eff6ff; }
-    .option-btn.selected { border-color: var(--accent); background: #eff6ff; color: var(--navy); }
-    .option-btn.correct { border-color: var(--success); background: #f0fdf4; color: #065f46; }
-    .option-btn.incorrect { border-color: var(--danger); background: #fef2f2; color: #991b1b; }
-    textarea.answer-area { width: 100%; border: 2px solid var(--grey-200); border-radius: 0.5rem; padding: 1rem; font-size: 0.95rem; line-height: 1.6; resize: vertical; min-height: 200px; font-family: inherit; transition: border-color 0.2s; }
-    textarea.answer-area:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59,130,246,0.1); }
-    .stat-card { background: white; border-radius: 0.75rem; padding: 1.25rem; border-left: 4px solid var(--accent); box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
-    .sidebar { background: var(--navy); width: 240px; min-height: calc(100vh - 64px); flex-shrink: 0; }
-    .sidebar a { display: flex; align-items: center; gap: 0.75rem; padding: 0.75rem 1.5rem; color: #94a3b8; text-decoration: none; transition: all 0.2s; font-size: 0.9rem; }
-    .sidebar a:hover, .sidebar a.active { background: rgba(255,255,255,0.1); color: white; }
-    .sidebar a.active { border-right: 3px solid var(--gold); }
-    .exam-tab { padding: 0.5rem 1.5rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer; transition: all 0.2s; border: 2px solid transparent; }
-    .exam-tab.active { border-color: currentColor; }
-    .exam-tab.toefl { color: #1e40af; }
-    .exam-tab.toefl.active { background: #dbeafe; }
-    .exam-tab.ielts { color: #065f46; }
-    .exam-tab.ielts.active { background: #d1fae5; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-    .recording-dot { animation: pulse 1.5s ease-in-out infinite; }
-    @media (max-width: 768px) {
-      .sidebar { display: none; }
-      .sidebar.open { display: block; position: fixed; top: 64px; left: 0; bottom: 0; z-index: 99; width: 240px; }
-    }
-  </style>
-</head>
-<body>
-${body}
-${scripts}
-</body>
-</html>`
+// ==================== PAGES ====================
 
-// ==================== PAGE ROUTES ====================
-
-// Login page
-app.get('/login', (c) => {
-  return c.html(getLayout('Login', `
-    <div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0f1e35] to-[#1a2b4a] p-4">
-      <div class="w-full max-w-md">
-        <div class="text-center mb-8">
-          <div class="inline-flex items-center justify-center w-16 h-16 bg-[#f59e0b] rounded-2xl mb-4">
-            <i class="fas fa-graduation-cap text-white text-2xl"></i>
-          </div>
-          <h1 class="text-3xl font-bold text-white">The Yamen Guide</h1>
-          <p class="text-[#94a3b8] mt-1">TOEFL & IELTS Preparation Platform</p>
-        </div>
-        <div class="card">
-          <div class="flex mb-6 bg-[#f1f5f9] rounded-lg p-1">
-            <button id="loginTab" onclick="switchTab('login')" class="flex-1 py-2 rounded-md font-semibold text-sm transition-all bg-white text-[#1a2b4a] shadow-sm">Sign In</button>
-            <button id="registerTab" onclick="switchTab('register')" class="flex-1 py-2 rounded-md font-semibold text-sm transition-all text-[#94a3b8]">Create Account</button>
-          </div>
-          
-          <div id="loginForm">
-            <div class="space-y-4">
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Email Address</label>
-                <input id="loginEmail" type="email" placeholder="your@email.com" 
-                  class="w-full border-2 border-[#e2e8f0] rounded-lg px-4 py-3 focus:outline-none focus:border-[#3b82f6] transition-colors" 
-                  value="student@prepmaster.edu"/>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Password</label>
-                <div class="relative">
-                  <input id="loginPassword" type="password" placeholder="••••••••" 
-                    class="w-full border-2 border-[#e2e8f0] rounded-lg px-4 py-3 focus:outline-none focus:border-[#3b82f6] transition-colors"
-                    value="Student@123"/>
-                  <button onclick="togglePass('loginPassword')" class="absolute right-3 top-3.5 text-[#94a3b8] hover:text-[#475569]">
-                    <i class="fas fa-eye text-sm"></i>
-                  </button>
-                </div>
-              </div>
-              <div id="loginError" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg"></div>
-              <button onclick="doLogin()" class="btn-primary w-full justify-center py-3">
-                <i class="fas fa-sign-in-alt"></i> Sign In
-              </button>
-            </div>
-            <div class="mt-4 p-3 bg-[#fff8f0] border border-[#fde68a] rounded-lg text-sm text-[#475569]">
-              <p class="text-[#92400e]">هل تواجه مشكلة بالدخول؟ تواصل مع الدعم الفني</p>
-              <a href="https://wa.me/962798919150" target="_blank" class="flex items-center gap-2 mt-2 font-bold text-[#25d366] hover:underline">
-                <i class="fab fa-whatsapp text-lg"></i> واتساب: 0798919150
-              </a>
-            </div>
-          </div>
-          
-          <div id="registerForm" class="hidden">
-            <div class="space-y-4">
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Full Name</label>
-                <input id="regName" type="text" placeholder="John Smith" 
-                  class="w-full border-2 border-[#e2e8f0] rounded-lg px-4 py-3 focus:outline-none focus:border-[#3b82f6] transition-colors"/>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Email Address</label>
-                <input id="regEmail" type="email" placeholder="your@email.com"
-                  class="w-full border-2 border-[#e2e8f0] rounded-lg px-4 py-3 focus:outline-none focus:border-[#3b82f6] transition-colors"/>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Password</label>
-                <input id="regPassword" type="password" placeholder="Min. 6 characters"
-                  class="w-full border-2 border-[#e2e8f0] rounded-lg px-4 py-3 focus:outline-none focus:border-[#3b82f6] transition-colors"/>
-              </div>
-              <div id="regError" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg"></div>
-              <button onclick="doRegister()" class="btn-primary w-full justify-center py-3">
-                <i class="fas fa-user-plus"></i> Create Account
-              </button>
-            </div>
-          </div>
-        </div>
+// LOGIN
+app.get('/login', (c) => c.html(L('تسجيل الدخول', `
+<div class="min-h-screen flex items-center justify-center bg-gradient-to-br from-[#0f1e35] to-[#1a2b4a] p-4">
+  <div class="w-full max-w-md">
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-16 h-16 bg-[#f59e0b] rounded-2xl mb-4 shadow-lg">
+        <i class="fas fa-graduation-cap text-white text-2xl"></i>
+      </div>
+      <h1 class="text-3xl font-bold text-white">The Yamen Guide</h1>
+      <p class="text-[#94a3b8] mt-1">منصة التحضير لـ IELTS & TOEFL iBT</p>
+    </div>
+    <div class="card">
+      <div class="flex mb-6 bg-[#f1f5f9] rounded-lg p-1">
+        <button id="loginTab" onclick="switchTab('login')" class="flex-1 py-2 rounded-md font-semibold text-sm transition-all bg-white text-[#1a2b4a] shadow-sm">تسجيل الدخول</button>
+        <button id="regTab" onclick="switchTab('reg')" class="flex-1 py-2 rounded-md font-semibold text-sm transition-all text-[#94a3b8]">حساب جديد</button>
+      </div>
+      <div id="loginForm" class="space-y-4">
+        <div><label class="block text-sm font-semibold text-[#475569] mb-1">البريد الإلكتروني</label>
+          <input id="lEmail" type="email" class="input" placeholder="example@email.com"/></div>
+        <div><label class="block text-sm font-semibold text-[#475569] mb-1">كلمة المرور</label>
+          <div class="relative"><input id="lPass" type="password" class="input" placeholder="••••••••"/>
+          <button onclick="tp('lPass')" class="absolute left-3 top-3.5 text-[#94a3b8]"><i class="fas fa-eye text-sm"></i></button></div></div>
+        <div id="lErr" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg"></div>
+        <button onclick="doLogin()" class="btn btn-primary w-full justify-center py-3 text-base"><i class="fas fa-sign-in-alt"></i> دخول</button>
+      </div>
+      <div id="regForm" class="hidden space-y-4">
+        <div><label class="block text-sm font-semibold text-[#475569] mb-1">الاسم الكامل</label>
+          <input id="rName" type="text" class="input" placeholder="محمد أحمد"/></div>
+        <div><label class="block text-sm font-semibold text-[#475569] mb-1">البريد الإلكتروني</label>
+          <input id="rEmail" type="email" class="input" placeholder="example@email.com"/></div>
+        <div><label class="block text-sm font-semibold text-[#475569] mb-1">كلمة المرور</label>
+          <input id="rPass" type="password" class="input" placeholder="6 أحرف على الأقل"/></div>
+        <div id="rErr" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg"></div>
+        <button onclick="doReg()" class="btn btn-primary w-full justify-center py-3 text-base"><i class="fas fa-user-plus"></i> إنشاء الحساب</button>
+      </div>
+      <div class="mt-4 p-3 bg-[#fff8f0] border border-[#fde68a] rounded-lg text-sm text-[#475569]">
+        <p class="text-[#92400e]">هل تواجه مشكلة بالدخول؟ تواصل مع الدعم الفني</p>
+        <a href="https://wa.me/962798919150" target="_blank" class="flex items-center gap-2 mt-2 font-bold text-[#25d366] hover:underline">
+          <i class="fab fa-whatsapp text-lg"></i> واتساب: 0798919150
+        </a>
       </div>
     </div>
-  `, `<script>
-    function switchTab(tab) {
-      document.getElementById('loginForm').classList.toggle('hidden', tab !== 'login');
-      document.getElementById('registerForm').classList.toggle('hidden', tab !== 'register');
-      document.getElementById('loginTab').className = 'flex-1 py-2 rounded-md font-semibold text-sm transition-all ' + (tab === 'login' ? 'bg-white text-[#1a2b4a] shadow-sm' : 'text-[#94a3b8]');
-      document.getElementById('registerTab').className = 'flex-1 py-2 rounded-md font-semibold text-sm transition-all ' + (tab === 'register' ? 'bg-white text-[#1a2b4a] shadow-sm' : 'text-[#94a3b8]');
-    }
-    function togglePass(id) {
-      const el = document.getElementById(id);
-      el.type = el.type === 'password' ? 'text' : 'password';
-    }
-    async function doLogin() {
-      const email = document.getElementById('loginEmail').value;
-      const password = document.getElementById('loginPassword').value;
-      const errEl = document.getElementById('loginError');
-      errEl.classList.add('hidden');
-      try {
-        const res = await fetch('/api/auth/login', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({email, password}) });
-        const data = await res.json();
-        if (data.success) {
-          window.location.href = data.user.role === 'admin' ? '/admin' : '/dashboard';
-        } else {
-          errEl.textContent = data.error; errEl.classList.remove('hidden');
-        }
-      } catch(e) { errEl.textContent = 'Connection error. Please try again.'; errEl.classList.remove('hidden'); }
-    }
-    async function doRegister() {
-      const name = document.getElementById('regName').value;
-      const email = document.getElementById('regEmail').value;
-      const password = document.getElementById('regPassword').value;
-      const errEl = document.getElementById('regError');
-      errEl.classList.add('hidden');
-      try {
-        const res = await fetch('/api/auth/register', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({name, email, password}) });
-        const data = await res.json();
-        if (data.success) { window.location.href = '/dashboard'; }
-        else { errEl.textContent = data.error; errEl.classList.remove('hidden'); }
-      } catch(e) { errEl.textContent = 'Connection error. Please try again.'; errEl.classList.remove('hidden'); }
-    }
-    document.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
-    // Check if already logged in
-    fetch('/api/auth/me').then(r => r.json()).then(d => { if (d.user) window.location.href = d.user.role === 'admin' ? '/admin' : '/dashboard'; });
-  </script>`))
-})
+  </div>
+</div>`, `<script>
+function switchTab(t){
+  document.getElementById('loginForm').classList.toggle('hidden',t!=='login');
+  document.getElementById('regForm').classList.toggle('hidden',t!=='reg');
+  document.getElementById('loginTab').className='flex-1 py-2 rounded-md font-semibold text-sm transition-all '+(t==='login'?'bg-white text-[#1a2b4a] shadow-sm':'text-[#94a3b8]');
+  document.getElementById('regTab').className='flex-1 py-2 rounded-md font-semibold text-sm transition-all '+(t==='reg'?'bg-white text-[#1a2b4a] shadow-sm':'text-[#94a3b8]');
+}
+function tp(id){const e=document.getElementById(id);e.type=e.type==='password'?'text':'password'}
+async function doLogin(){
+  const email=document.getElementById('lEmail').value,password=document.getElementById('lPass').value,err=document.getElementById('lErr');
+  err.classList.add('hidden');
+  try{const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password})});
+  const d=await r.json();
+  if(d.success){window.location.href=d.user.role==='admin'?'/admin':'/dashboard';}
+  else{err.textContent=d.error;err.classList.remove('hidden');}}catch(e){err.textContent='خطأ في الاتصال';err.classList.remove('hidden');}
+}
+async function doReg(){
+  const name=document.getElementById('rName').value,email=document.getElementById('rEmail').value,password=document.getElementById('rPass').value,err=document.getElementById('rErr');
+  err.classList.add('hidden');
+  try{const r=await fetch('/api/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,email,password})});
+  const d=await r.json();
+  if(d.success){window.location.href='/dashboard';}
+  else{err.textContent=d.error;err.classList.remove('hidden');}}catch(e){err.textContent='خطأ في الاتصال';err.classList.remove('hidden');}
+}
+document.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+fetch('/api/auth/me').then(r=>r.json()).then(d=>{if(d.user)window.location.href=d.user.role==='admin'?'/admin':'/dashboard';});
+</script>`)))
 
-// Dashboard
+// DASHBOARD
 app.get('/dashboard', async (c) => {
   const user = await getUser(c)
   if (!user) return c.redirect('/login')
-
-  return c.html(getLayout('Dashboard', `
-    <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
-      <div class="flex items-center gap-4">
-        <button onclick="toggleSidebar()" class="md:hidden text-white text-xl"><i class="fas fa-bars"></i></button>
-        <span class="text-[#94a3b8] text-sm hidden sm:block"><i class="fas fa-user-circle mr-1"></i>${user.name}</span>
-        <button onclick="logout()" class="btn-secondary text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i> <span class="hidden sm:inline">Logout</span></button>
-      </div>
+  return c.html(L('لوحة التحكم', `
+<nav class="navbar">
+  <a href="/dashboard" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-3">
+    <button onclick="document.getElementById('sidebar').classList.toggle('open')" class="md:hidden text-white text-xl"><i class="fas fa-bars"></i></button>
+    <span class="text-[#94a3b8] text-sm hidden sm:block"><i class="fas fa-user-circle mr-1"></i>${user.name}</span>
+    <button onclick="logout()" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>
+  </div>
+</nav>
+<div class="flex">
+  <aside class="sidebar" id="sidebar">
+    <nav class="py-4">
+      <a href="/dashboard" class="active"><i class="fas fa-home w-5"></i> الرئيسية</a>
+      <a href="/courses"><i class="fas fa-layer-group w-5"></i> المسارات والأسعار</a>
+      <a href="/practice"><i class="fas fa-play-circle w-5"></i> الاختبارات التدريبية</a>
+      <a href="/activate"><i class="fas fa-key w-5"></i> تفعيل مسار</a>
+      <div class="px-6 py-2 mt-3 mb-1 text-xs uppercase tracking-wider text-[#475569] font-semibold">دعم</div>
+      <a href="https://wa.me/962798919150" target="_blank"><i class="fab fa-whatsapp w-5 text-[#25d366]"></i> تواصل معنا</a>
     </nav>
-    <div class="flex">
-      <aside class="sidebar" id="sidebar">
-        <nav class="py-4">
-          <a href="/dashboard" class="active"><i class="fas fa-home w-5"></i> Dashboard</a>
-          <a href="/practice"><i class="fas fa-play-circle w-5"></i> Practice Tests</a>
-          <a href="/progress"><i class="fas fa-chart-line w-5"></i> My Progress</a>
-          <div class="px-6 py-2 mt-4 mb-1 text-xs uppercase tracking-wider text-[#475569] font-semibold">Quick Practice</div>
-          <a href="/practice?type=TOEFL&module=reading"><i class="fas fa-book-open w-5"></i> TOEFL Reading</a>
-          <a href="/practice?type=TOEFL&module=listening"><i class="fas fa-headphones w-5"></i> TOEFL Listening</a>
-          <a href="/practice?type=IELTS&module=reading"><i class="fas fa-file-alt w-5"></i> IELTS Reading</a>
-          <a href="/practice?type=IELTS&module=writing"><i class="fas fa-pen w-5"></i> IELTS Writing</a>
-        </nav>
-      </aside>
-      <main class="flex-1 p-6 overflow-y-auto">
-        <div class="max-w-5xl mx-auto">
-          <div class="mb-6">
-            <h1 class="text-2xl font-bold text-[#1a2b4a]">Welcome back, ${user.name.split(' ')[0]}!</h1>
-            <p class="text-[#475569] mt-1">Continue your exam preparation journey</p>
-          </div>
-          
-          <!-- Stats Row -->
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" id="statsRow">
-            <div class="stat-card"><div class="text-2xl font-bold text-[#1a2b4a]" id="statSessions">-</div><div class="text-sm text-[#475569] mt-1">Tests Completed</div></div>
-            <div class="stat-card" style="border-color:#f59e0b"><div class="text-2xl font-bold text-[#1a2b4a]" id="statAvg">-</div><div class="text-sm text-[#475569] mt-1">Avg. Score</div></div>
-            <div class="stat-card" style="border-color:#10b981"><div class="text-2xl font-bold text-[#1a2b4a]" id="statStreak">-</div><div class="text-sm text-[#475569] mt-1">Day Streak</div></div>
-            <div class="stat-card" style="border-color:#8b5cf6"><div class="text-2xl font-bold text-[#1a2b4a]">4</div><div class="text-sm text-[#475569] mt-1">Modules Available</div></div>
-          </div>
+  </aside>
+  <main class="flex-1 p-4 md:p-6 overflow-y-auto">
+    <div class="max-w-5xl mx-auto">
+      <div class="mb-6">
+        <h1 class="text-2xl font-bold text-[#1a2b4a]">أهلاً، ${user.name.split(' ')[0]}! 👋</h1>
+        <p class="text-[#475569] mt-1">مرحباً بك في منصة The Yamen Guide</p>
+      </div>
 
-          <!-- Practice Modules -->
-          <h2 class="text-lg font-bold text-[#1a2b4a] mb-4">Practice Modules</h2>
-          <div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <div class="card module-card reading" onclick="window.location='/practice?type=TOEFL&module=reading'">
-              <div class="w-12 h-12 rounded-xl bg-[#fef3c7] flex items-center justify-center mb-3">
-                <i class="fas fa-book-open text-[#f59e0b] text-xl"></i>
-              </div>
-              <h3 class="font-bold text-[#1a2b4a]">Reading</h3>
-              <p class="text-xs text-[#94a3b8] mt-1">Comprehension & Analysis</p>
-              <div class="mt-3 flex gap-1">
-                <span class="badge-toefl">TOEFL</span>
-                <span class="badge-ielts">IELTS</span>
-              </div>
-            </div>
-            <div class="card module-card listening" onclick="window.location='/practice?type=TOEFL&module=listening'">
-              <div class="w-12 h-12 rounded-xl bg-[#ede9fe] flex items-center justify-center mb-3">
-                <i class="fas fa-headphones text-[#8b5cf6] text-xl"></i>
-              </div>
-              <h3 class="font-bold text-[#1a2b4a]">Listening</h3>
-              <p class="text-xs text-[#94a3b8] mt-1">Audio Comprehension</p>
-              <div class="mt-3 flex gap-1">
-                <span class="badge-toefl">TOEFL</span>
-                <span class="badge-ielts">IELTS</span>
-              </div>
-            </div>
-            <div class="card module-card speaking" onclick="window.location='/practice?type=TOEFL&module=speaking'">
-              <div class="w-12 h-12 rounded-xl bg-[#fee2e2] flex items-center justify-center mb-3">
-                <i class="fas fa-microphone text-[#ef4444] text-xl"></i>
-              </div>
-              <h3 class="font-bold text-[#1a2b4a]">Speaking</h3>
-              <p class="text-xs text-[#94a3b8] mt-1">Oral Production</p>
-              <div class="mt-3 flex gap-1">
-                <span class="badge-toefl">TOEFL</span>
-                <span class="badge-ielts">IELTS</span>
-              </div>
-            </div>
-            <div class="card module-card writing" onclick="window.location='/practice?type=TOEFL&module=writing'">
-              <div class="w-12 h-12 rounded-xl bg-[#ecfdf5] flex items-center justify-center mb-3">
-                <i class="fas fa-pen-nib text-[#10b981] text-xl"></i>
-              </div>
-              <h3 class="font-bold text-[#1a2b4a]">Writing</h3>
-              <p class="text-xs text-[#94a3b8] mt-1">Essay & Task Writing</p>
-              <div class="mt-3 flex gap-1">
-                <span class="badge-toefl">TOEFL</span>
-                <span class="badge-ielts">IELTS</span>
-              </div>
-            </div>
-          </div>
+      <!-- Stats -->
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="card border-r-4 border-[#3b82f6]"><div class="text-2xl font-bold text-[#1a2b4a]" id="dSessions">-</div><div class="text-sm text-[#475569] mt-1">اختبارات مكتملة</div></div>
+        <div class="card border-r-4 border-[#f59e0b]"><div class="text-2xl font-bold text-[#1a2b4a]" id="dAvg">-</div><div class="text-sm text-[#475569] mt-1">متوسط الدرجات</div></div>
+        <div class="card border-r-4 border-[#10b981]"><div class="text-2xl font-bold text-[#1a2b4a]" id="dCourses">-</div><div class="text-sm text-[#475569] mt-1">مساراتي المفعّلة</div></div>
+        <div class="card border-r-4 border-[#8b5cf6]"><div class="text-2xl font-bold text-[#1a2b4a]" id="dHours">—</div><div class="text-sm text-[#475569] mt-1">ساعات VIP</div></div>
+      </div>
 
-          <!-- Exam Selection -->
-          <h2 class="text-lg font-bold text-[#1a2b4a] mb-4">Choose Your Exam</h2>
-          <div class="grid md:grid-cols-2 gap-4 mb-8">
-            <div class="card hover:shadow-lg transition-shadow cursor-pointer border-2 hover:border-[#3b82f6]" onclick="window.location='/practice?type=TOEFL'">
-              <div class="flex items-start gap-4">
-                <div class="w-14 h-14 rounded-xl bg-[#dbeafe] flex items-center justify-center flex-shrink-0">
-                  <span class="font-bold text-[#1e40af] text-lg">T</span>
-                </div>
-                <div>
-                  <h3 class="font-bold text-[#1a2b4a] text-lg">TOEFL iBT</h3>
-                  <p class="text-sm text-[#475569] mt-1">Internet-Based Test for academic English proficiency. Required for US/Canadian universities.</p>
-                  <div class="flex gap-2 mt-2">
-                    <span class="badge-reading">Reading</span>
-                    <span class="badge-listening">Listening</span>
-                    <span class="badge-speaking">Speaking</span>
-                    <span class="badge-writing">Writing</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="card hover:shadow-lg transition-shadow cursor-pointer border-2 hover:border-[#10b981]" onclick="window.location='/practice?type=IELTS'">
-              <div class="flex items-start gap-4">
-                <div class="w-14 h-14 rounded-xl bg-[#d1fae5] flex items-center justify-center flex-shrink-0">
-                  <span class="font-bold text-[#065f46] text-lg">I</span>
-                </div>
-                <div>
-                  <h3 class="font-bold text-[#1a2b4a] text-lg">IELTS Academic</h3>
-                  <p class="text-sm text-[#475569] mt-1">International English Language Testing System. Accepted by UK, Australia, and global institutions.</p>
-                  <div class="flex gap-2 mt-2">
-                    <span class="badge-reading">Reading</span>
-                    <span class="badge-listening">Listening</span>
-                    <span class="badge-speaking">Speaking</span>
-                    <span class="badge-writing">Writing</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
+      <!-- My Courses -->
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold text-[#1a2b4a]">مساراتي</h2>
+        <a href="/activate" class="btn btn-primary text-sm"><i class="fas fa-key"></i> تفعيل مسار جديد</a>
+      </div>
+      <div id="myCoursesGrid" class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4 mb-8">
+        <div class="col-span-full text-center py-10 text-[#94a3b8]">
+          <div class="w-12 h-12 border-4 border-[#3b82f6] border-t-transparent rounded-full animate-spin mx-auto mb-3"></div>
+          <p>جارٍ التحميل...</p>
+        </div>
+      </div>
 
-          <!-- Recent Activity -->
-          <h2 class="text-lg font-bold text-[#1a2b4a] mb-4">Recent Activity</h2>
-          <div class="card">
-            <div id="recentActivity">
-              <div class="text-center py-8 text-[#94a3b8]">
-                <i class="fas fa-history text-4xl mb-3"></i>
-                <p>No practice sessions yet. Start your first test!</p>
-                <a href="/practice" class="btn-primary mt-4 inline-flex"><i class="fas fa-play"></i> Start Practice</a>
-              </div>
-            </div>
+      <!-- All Tracks Preview -->
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-bold text-[#1a2b4a]">جميع المسارات المتاحة</h2>
+        <a href="/courses" class="btn btn-outline text-sm">عرض الأسعار <i class="fas fa-arrow-left"></i></a>
+      </div>
+      <div id="allCoursesGrid" class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8"></div>
+
+      <!-- Quick Actions -->
+      <div class="grid md:grid-cols-2 gap-4">
+        <div class="card bg-gradient-to-l from-[#0ea5e9] to-[#0284c7] text-white cursor-pointer hover:shadow-lg transition-shadow" onclick="window.location='/practice?type=IELTS'">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-xl bg-white/20 flex items-center justify-center text-2xl">🎯</div>
+            <div><h3 class="font-bold text-lg">تدريب IELTS</h3><p class="text-blue-100 text-sm mt-1">ابدأ اختباراً تدريبياً الآن</p></div>
           </div>
         </div>
-      </main>
+        <div class="card bg-gradient-to-l from-[#ef4444] to-[#dc2626] text-white cursor-pointer hover:shadow-lg transition-shadow" onclick="window.location='/practice?type=TOEFL'">
+          <div class="flex items-center gap-4">
+            <div class="w-14 h-14 rounded-xl bg-white/20 flex items-center justify-center text-2xl">📝</div>
+            <div><h3 class="font-bold text-lg">تدريب TOEFL</h3><p class="text-red-100 text-sm mt-1">ابدأ اختباراً تدريبياً الآن</p></div>
+          </div>
+        </div>
+      </div>
     </div>
-  `, `<script>
-    function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); }
-    async function logout() {
-      await fetch('/api/auth/logout', {method:'POST'});
-      window.location.href = '/login';
-    }
-    async function loadStats() {
-      try {
-        const r = await fetch('/api/dashboard/stats');
-        const d = await r.json();
-        document.getElementById('statSessions').textContent = d.total_sessions || 0;
-        document.getElementById('statAvg').textContent = (d.avg_score || 0) + '%';
-        document.getElementById('statStreak').textContent = d.streak_days || 0;
-        
-        if (d.recent_sessions && d.recent_sessions.length > 0) {
-          const moduleColors = { reading: 'badge-reading', listening: 'badge-listening', speaking: 'badge-speaking', writing: 'badge-writing' };
-          document.getElementById('recentActivity').innerHTML = d.recent_sessions.map(s => {
-            const pct = s.max_score > 0 ? Math.round((s.score / s.max_score) * 100) : 0;
-            const scoreColor = pct >= 70 ? 'text-green-600' : pct >= 50 ? 'text-yellow-600' : 'text-red-600';
-            const date = s.completed_at ? new Date(s.completed_at).toLocaleDateString() : 'N/A';
-            return '<div class="flex items-center justify-between py-3 border-b border-[#f1f5f9] last:border-0">' +
-              '<div class="flex items-center gap-3">' +
-              '<span class="badge-' + (s.exam_type === 'TOEFL' ? 'toefl' : 'ielts') + '">' + s.exam_type + '</span>' +
-              '<span class="' + (moduleColors[s.module] || '') + '">' + s.module + '</span>' +
-              '<span class="text-sm text-[#475569]">' + date + '</span>' +
-              '</div>' +
-              '<span class="font-bold ' + scoreColor + '">' + pct + '%</span>' +
-              '</div>';
-          }).join('');
-        }
-      } catch(e) { console.error(e); }
-    }
-    loadStats();
-  </script>`))
+  </main>
+</div>
+<!-- Welcome Modal -->
+<div id="welcomeModal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl">
+    <div class="text-center mb-4"><div class="text-5xl mb-3" id="welcomeEmoji">🎉</div>
+      <h2 class="text-xl font-bold text-[#1a2b4a]" id="welcomeTitle">تم التفعيل!</h2></div>
+    <div class="bg-[#f8fafc] rounded-xl p-4 text-sm text-[#475569] whitespace-pre-line leading-relaxed" id="welcomeMsg"></div>
+    <button onclick="closeWelcome()" class="btn btn-primary w-full justify-center mt-4 py-3">ابدأ الآن <i class="fas fa-arrow-left"></i></button>
+  </div>
+</div>`, `<script>
+async function logout(){await fetch('/api/auth/logout',{method:'POST'});window.location.href='/login';}
+
+const courseColors={IELTS_FULL:'#0ea5e9',IELTS_READ:'#0ea5e9',IELTS_WRITE:'#0ea5e9',IELTS_LISTEN:'#0ea5e9',IELTS_SPEAK:'#0ea5e9',TOEFL_FULL:'#ef4444',TOEFL_READ:'#ef4444',TOEFL_WRITE:'#ef4444',TOEFL_LISTEN:'#ef4444',TOEFL_SPEAK:'#ef4444',FOUNDATIONS:'#8b5cf6',PRIVATE_VIP:'#f59e0b'};
+const examLabels={IELTS:'IELTS',TOEFL:'TOEFL iBT',FOUNDATIONS:'تأسيس',PRIVATE:'VIP'};
+
+async function loadDashboard(){
+  const [statsR, myCoursesR, allCoursesR] = await Promise.all([
+    fetch('/api/dashboard/stats'),fetch('/api/my-courses'),fetch('/api/courses')
+  ]);
+  const stats=await statsR.json(), myCourses=await myCoursesR.json(), allCourses=await allCoursesR.json();
+
+  document.getElementById('dSessions').textContent=stats.total_sessions||0;
+  document.getElementById('dAvg').textContent=(stats.avg_score||0)+'%';
+  document.getElementById('dCourses').textContent=(myCourses.enrollments||[]).length;
+
+  // Private hours
+  const vip=(myCourses.enrollments||[]).find(e=>e.code==='PRIVATE_VIP');
+  document.getElementById('dHours').textContent=vip?vip.remaining_hours+'h':'—';
+
+  // My Courses Grid
+  const enrolled=myCourses.enrollments||[];
+  const enrolledCodes=new Set(enrolled.map(e=>e.code));
+  const grid=document.getElementById('myCoursesGrid');
+
+  if(enrolled.length===0){
+    grid.innerHTML='<div class="col-span-full card text-center py-10"><i class="fas fa-lock text-4xl text-[#94a3b8] mb-3"></i><p class="text-[#475569] font-semibold">لا توجد مسارات مفعّلة بعد</p><p class="text-sm text-[#94a3b8] mt-1">اشترِ كوداً وفعّل مسارك</p><div class="flex gap-3 justify-center mt-4"><a href="/courses" class="btn btn-outline text-sm">عرض الأسعار</a><a href="/activate" class="btn btn-primary text-sm"><i class="fas fa-key"></i> تفعيل</a></div></div>';
+  } else {
+    grid.innerHTML=enrolled.map(e=>{
+      const col=e.color||'#3b82f6';
+      const hoursHtml=e.total_hours?'<div class="mt-3 pt-3 border-t border-gray-100"><div class="flex justify-between text-xs mb-1"><span class="text-[#94a3b8]">الساعات المتبقية</span><span class="font-bold" style="color:'+col+'">'+e.remaining_hours+'/'+e.total_hours+'</span></div><div class="w-full bg-gray-100 rounded-full h-2"><div class="h-2 rounded-full" style="width:'+(e.remaining_hours/e.total_hours*100)+'%;background:'+col+'"></div></div></div>':'';
+      return '<div class="card course-card unlocked" style="border-color:'+col+';color:'+col+'"><div class="unlock-badge"><i class="fas fa-check text-xs"></i></div><div class="w-10 h-10 rounded-lg flex items-center justify-center mb-3" style="background:'+col+'20"><i class="fas '+e.icon+'" style="color:'+col+'"></i></div><h3 class="font-bold text-[#1a2b4a] text-sm leading-tight">'+e.name_ar+'</h3>'+hoursHtml+'<button onclick="goToModule(\''+e.exam_type+'\',\''+e.module+'\')" class="mt-3 btn btn-primary text-xs w-full justify-center py-1.5" style="background:'+col+'">ابدأ <i class="fas fa-arrow-left"></i></button></div>';
+    }).join('');
+  }
+
+  // All Courses Grid (locked state)
+  const all=allCourses.courses||[];
+  document.getElementById('allCoursesGrid').innerHTML=all.map(co=>{
+    const locked=!enrolledCodes.has(co.code);
+    const col=co.color||'#3b82f6';
+    return '<div class="card course-card '+(locked?'locked':'unlocked')+'" style="'+(locked?'':'border-color:'+col+';')+'" onclick="'+(locked?'window.location=\'/courses#'+co.code+'\'':'goToModule(\''+co.exam_type+'\',\''+co.module+'\')')+'">'+(locked?'<div class="lock-badge"><i class="fas fa-lock text-xs"></i></div>':'<div class="unlock-badge"><i class="fas fa-check text-xs"></i></div>')+'<div class="w-10 h-10 rounded-lg flex items-center justify-center mb-2" style="background:'+col+(locked?'40':'20')+'"><i class="fas '+co.icon+'" style="color:'+col+(locked?';opacity:.6':'')+'"></i></div><h3 class="font-bold text-[#1a2b4a] text-xs leading-tight">'+co.name_ar+'</h3><p class="text-xs font-bold mt-1" style="color:'+col+(locked?';opacity:.7':'')+'">'+co.price+' د.أ</p></div>';
+  }).join('');
+
+  // Welcome modal
+  const wm=sessionStorage.getItem('welcome_msg');
+  if(wm){const d=JSON.parse(wm);document.getElementById('welcomeMsg').textContent=d.msg;document.getElementById('welcomeTitle').textContent=d.title;document.getElementById('welcomeModal').classList.remove('hidden');sessionStorage.removeItem('welcome_msg');}
+}
+function goToModule(exam,module){if(!module||module==='null')window.location='/practice?type='+exam;else window.location='/practice?type='+exam+'&module='+module;}
+function closeWelcome(){document.getElementById('welcomeModal').classList.add('hidden');}
+loadDashboard();
+</script>`))
 })
 
-// Practice Selection Page
+// COURSES PAGE
+app.get('/courses', async (c) => {
+  const user = await getUser(c)
+  return c.html(L('المسارات والأسعار', `
+<nav class="navbar">
+  <a href="/dashboard" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-3">
+    ${user ? `<a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>لوحتي</a><button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>` : `<a href="/login" class="btn btn-primary text-sm">دخول / تسجيل</a>`}
+  </div>
+</nav>
+<div class="max-w-6xl mx-auto p-4 md:p-6">
+  <div class="text-center mb-10">
+    <h1 class="text-3xl font-bold text-[#1a2b4a] mb-2">المسارات والأسعار</h1>
+    <p class="text-[#475569]">اختر المسار المناسب لك وابدأ رحلتك نحو الدرجة المطلوبة</p>
+  </div>
+
+  <!-- IELTS Section -->
+  <div class="mb-10">
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-10 h-10 rounded-xl bg-[#dbeafe] flex items-center justify-center"><i class="fas fa-globe text-[#0ea5e9] text-lg"></i></div>
+      <div><h2 class="text-xl font-bold text-[#1a2b4a]">IELTS Academic</h2><p class="text-sm text-[#475569]">الامتحان الأكثر قبولاً حول العالم</p></div>
+    </div>
+    <div class="grid md:grid-cols-5 gap-4">
+      <div class="md:col-span-2 card border-2 border-[#0ea5e9] relative overflow-hidden">
+        <div class="absolute top-3 left-3 bg-[#0ea5e9] text-white text-xs font-bold px-2 py-1 rounded-full">الأفضل قيمةً</div>
+        <div class="w-12 h-12 rounded-xl bg-[#dbeafe] flex items-center justify-center mb-3"><i class="fas fa-globe text-[#0ea5e9] text-xl"></i></div>
+        <h3 class="font-bold text-[#1a2b4a] text-lg">الكورس الكامل</h3>
+        <p class="text-sm text-[#475569] mt-1 mb-3">Reading + Writing + Listening + Speaking</p>
+        <div class="price-tag text-[#0ea5e9]">150 <span class="text-base font-semibold">د.أ</span></div>
+        <p class="text-xs text-[#94a3b8] mt-1">بدل 200 د.أ عند الشراء منفرداً</p>
+        <button onclick="buyNow('IELTS_FULL','IELTS الكامل',150)" class="btn btn-primary w-full justify-center mt-4" style="background:#0ea5e9"><i class="fas fa-shopping-cart"></i> اشترِ الآن</button>
+        ${user ? '<button onclick="window.location=\'/activate\'" class="btn btn-outline w-full justify-center mt-2 text-sm"><i class="fas fa-key"></i> لديّ كود تفعيل</button>' : ''}
+      </div>
+      <div class="md:col-span-3 grid grid-cols-2 gap-3">
+        ${[['IELTS_READ','fa-book-open','Reading','قراءة',50],['IELTS_WRITE','fa-pen-nib','Writing','كتابة',50],['IELTS_LISTEN','fa-headphones','Listening','استماع',50],['IELTS_SPEAK','fa-microphone','Speaking','تحدث',50]].map(([code,icon,en,ar,price])=>`
+        <div class="card hover:shadow-md transition-shadow" id="${code}">
+          <div class="w-9 h-9 rounded-lg bg-[#dbeafe] flex items-center justify-center mb-2"><i class="fas ${icon} text-[#0ea5e9]"></i></div>
+          <h4 class="font-bold text-[#1a2b4a] text-sm">${en}</h4><p class="text-xs text-[#475569]">${ar}</p>
+          <div class="text-[#0ea5e9] font-bold text-lg mt-1">${price} <span class="text-xs">د.أ</span></div>
+          <button onclick="buyNow('${code}','IELTS ${en}',${price})" class="btn text-xs w-full justify-center mt-2 py-1.5" style="background:#0ea5e9;color:white"><i class="fas fa-cart-plus"></i> شراء</button>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>
+
+  <!-- TOEFL Section -->
+  <div class="mb-10">
+    <div class="flex items-center gap-3 mb-4">
+      <div class="w-10 h-10 rounded-xl bg-[#fee2e2] flex items-center justify-center"><i class="fas fa-university text-[#ef4444] text-lg"></i></div>
+      <div><h2 class="text-xl font-bold text-[#1a2b4a]">TOEFL iBT</h2><p class="text-sm text-[#475569]">المطلوب للجامعات الأمريكية والكندية</p></div>
+    </div>
+    <div class="grid md:grid-cols-5 gap-4">
+      <div class="md:col-span-2 card border-2 border-[#ef4444] relative overflow-hidden">
+        <div class="absolute top-3 left-3 bg-[#ef4444] text-white text-xs font-bold px-2 py-1 rounded-full">الأفضل قيمةً</div>
+        <div class="w-12 h-12 rounded-xl bg-[#fee2e2] flex items-center justify-center mb-3"><i class="fas fa-university text-[#ef4444] text-xl"></i></div>
+        <h3 class="font-bold text-[#1a2b4a] text-lg">الكورس الكامل</h3>
+        <p class="text-sm text-[#475569] mt-1 mb-3">Reading + Writing + Listening + Speaking</p>
+        <div class="price-tag text-[#ef4444]">180 <span class="text-base font-semibold">د.أ</span></div>
+        <p class="text-xs text-[#94a3b8] mt-1">بدل 280 د.أ عند الشراء منفرداً</p>
+        <button onclick="buyNow('TOEFL_FULL','TOEFL الكامل',180)" class="btn btn-primary w-full justify-center mt-4" style="background:#ef4444"><i class="fas fa-shopping-cart"></i> اشترِ الآن</button>
+        ${user ? '<button onclick="window.location=\'/activate\'" class="btn btn-outline w-full justify-center mt-2 text-sm"><i class="fas fa-key"></i> لديّ كود تفعيل</button>' : ''}
+      </div>
+      <div class="md:col-span-3 grid grid-cols-2 gap-3">
+        ${[['TOEFL_READ','fa-book-open','Reading','قراءة',70],['TOEFL_WRITE','fa-pen-nib','Writing','كتابة',70],['TOEFL_LISTEN','fa-headphones','Listening','استماع',70],['TOEFL_SPEAK','fa-microphone','Speaking','تحدث',70]].map(([code,icon,en,ar,price])=>`
+        <div class="card hover:shadow-md transition-shadow" id="${code}">
+          <div class="w-9 h-9 rounded-lg bg-[#fee2e2] flex items-center justify-center mb-2"><i class="fas ${icon} text-[#ef4444]"></i></div>
+          <h4 class="font-bold text-[#1a2b4a] text-sm">${en}</h4><p class="text-xs text-[#475569]">${ar}</p>
+          <div class="text-[#ef4444] font-bold text-lg mt-1">${price} <span class="text-xs">د.أ</span></div>
+          <button onclick="buyNow('${code}','TOEFL ${en}',${price})" class="btn text-xs w-full justify-center mt-2 py-1.5" style="background:#ef4444;color:white"><i class="fas fa-cart-plus"></i> شراء</button>
+        </div>`).join('')}
+      </div>
+    </div>
+  </div>
+
+  <!-- Foundations + VIP -->
+  <div class="grid md:grid-cols-2 gap-6 mb-10">
+    <div class="card border-2 border-[#8b5cf6]" id="FOUNDATIONS">
+      <div class="flex items-start gap-4">
+        <div class="w-14 h-14 rounded-xl bg-[#ede9fe] flex items-center justify-center flex-shrink-0"><i class="fas fa-layer-group text-[#8b5cf6] text-2xl"></i></div>
+        <div class="flex-1">
+          <span class="badge badge-found mb-2">تأسيس</span>
+          <h3 class="font-bold text-[#1a2b4a] text-lg">مسار التأسيس اللغوي</h3>
+          <p class="text-sm text-[#475569] mt-1">برنامج شامل لبناء قواعد اللغة الإنجليزية من الصفر للوصول لمستوى B2+. Grammar, Vocabulary, Reading, Writing, Conversation.</p>
+          <div class="price-tag text-[#8b5cf6] mt-3">150 <span class="text-base font-semibold">د.أ</span></div>
+          <button onclick="buyNow('FOUNDATIONS','مسار التأسيس',150)" class="btn w-full justify-center mt-3" style="background:#8b5cf6;color:white"><i class="fas fa-shopping-cart"></i> اشترِ الآن</button>
+        </div>
+      </div>
+    </div>
+    <div class="card border-2 border-[#f59e0b] relative overflow-hidden" id="PRIVATE_VIP">
+      <div class="absolute top-0 right-0 bg-[#f59e0b] text-white text-xs font-bold px-3 py-1 rounded-bl-lg">👑 VIP</div>
+      <div class="flex items-start gap-4">
+        <div class="w-14 h-14 rounded-xl bg-[#fef3c7] flex items-center justify-center flex-shrink-0"><i class="fas fa-crown text-[#f59e0b] text-2xl"></i></div>
+        <div class="flex-1">
+          <span class="badge badge-vip mb-2">خاص</span>
+          <h3 class="font-bold text-[#1a2b4a] text-lg">المسار الخاص VIP</h3>
+          <p class="text-sm text-[#475569] mt-1">20 ساعة تدريب خاص مع المدرب. مرونة كاملة في الجدول، تدريس مخصص 100% لاحتياجاتك.</p>
+          <div class="flex items-end gap-3 mt-3">
+            <div><div class="price-tag text-[#f59e0b]">400 <span class="text-base font-semibold">د.أ</span></div><p class="text-xs text-[#94a3b8]">للباقة الكاملة (20 ساعة)</p></div>
+            <div class="text-[#475569] text-sm font-bold">أو 25 د.أ / ساعة</div>
+          </div>
+          <button onclick="buyNow('PRIVATE_VIP','المسار الخاص VIP',400)" class="btn btn-gold w-full justify-center mt-3"><i class="fas fa-shopping-cart"></i> احجز الآن</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Payment Methods -->
+  <div class="card mb-6">
+    <h3 class="font-bold text-[#1a2b4a] text-lg mb-4 text-center"><i class="fas fa-credit-card text-[#3b82f6] mr-2"></i>طرق الدفع المتاحة</h3>
+    <div class="grid md:grid-cols-2 gap-6">
+      <!-- Zain Cash -->
+      <div class="border-2 border-[#e2e8f0] rounded-xl p-4 text-center">
+        <div class="text-3xl mb-2">📱</div>
+        <h4 class="font-bold text-[#1a2b4a] text-lg mb-1">Zain Cash</h4>
+        <p class="text-[#475569] text-sm mb-3">تحويل مباشر على الرقم</p>
+        <div class="bg-[#f8fafc] rounded-lg p-3 font-mono font-bold text-xl text-[#1a2b4a] mb-3">0798919150</div>
+        <div id="qrZain" class="flex justify-center mb-3"></div>
+        <p class="text-xs text-[#94a3b8]">اسم الحساب: Yamen Guide</p>
+      </div>
+      <!-- CliQ -->
+      <div class="border-2 border-[#e2e8f0] rounded-xl p-4 text-center">
+        <div class="text-3xl mb-2">🏦</div>
+        <h4 class="font-bold text-[#1a2b4a] text-lg mb-1">CliQ – البنك الإسلامي</h4>
+        <p class="text-[#475569] text-sm mb-3">تحويل مباشر على الرقم</p>
+        <div class="bg-[#f8fafc] rounded-lg p-3 font-mono font-bold text-xl text-[#1a2b4a] mb-3">0798919150</div>
+        <div id="qrCliq" class="flex justify-center mb-3"></div>
+        <p class="text-xs text-[#94a3b8]">البنك الإسلامي الأردني</p>
+      </div>
+    </div>
+    <div class="mt-4 p-4 bg-[#f0fdf4] border border-[#86efac] rounded-xl text-sm text-[#166534]">
+      <i class="fas fa-info-circle mr-2"></i>
+      بعد الدفع، أرسل صورة الإيصال على الواتساب <strong>0798919150</strong> وسيتم إرسال كود التفعيل خلال دقائق.
+    </div>
+  </div>
+</div>
+
+<!-- Payment Modal -->
+<div id="payModal" class="hidden fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+  <div class="bg-white rounded-2xl max-w-lg w-full shadow-2xl overflow-hidden">
+    <div class="p-1" id="payModalHeader" style="background:#3b82f6"></div>
+    <div class="p-6">
+      <h2 class="text-xl font-bold text-[#1a2b4a] mb-1" id="payModalTitle">إتمام الشراء</h2>
+      <p class="text-[#475569] text-sm mb-4" id="payModalCourse"></p>
+      <div class="grid grid-cols-2 gap-4 mb-6">
+        <div class="border-2 border-[#e2e8f0] rounded-xl p-4 text-center cursor-pointer hover:border-[#3b82f6] transition-colors" onclick="selectPay('zaincash')">
+          <div class="text-3xl mb-1">📱</div><div class="font-bold text-sm">Zain Cash</div>
+          <div class="text-xs text-[#94a3b8]">0798919150</div>
+        </div>
+        <div class="border-2 border-[#e2e8f0] rounded-xl p-4 text-center cursor-pointer hover:border-[#3b82f6] transition-colors" onclick="selectPay('cliq')">
+          <div class="text-3xl mb-1">🏦</div><div class="font-bold text-sm">CliQ</div>
+          <div class="text-xs text-[#94a3b8]">البنك الإسلامي</div>
+        </div>
+      </div>
+      <div id="payDetails" class="hidden mb-4">
+        <div class="bg-[#f8fafc] rounded-xl p-4 text-center mb-3">
+          <p class="text-sm text-[#475569] mb-2" id="payMethod"></p>
+          <div class="font-mono font-bold text-2xl text-[#1a2b4a] mb-2">0798919150</div>
+          <div class="text-2xl font-bold mb-1" id="payAmount"></div>
+          <p class="text-xs text-[#94a3b8]">المبلغ المطلوب</p>
+        </div>
+        <button onclick="sendToWhatsApp()" class="btn btn-wa w-full justify-center py-3 text-base">
+          <i class="fab fa-whatsapp text-xl"></i> إرسال الإيصال على الواتساب
+        </button>
+        <p class="text-xs text-center text-[#94a3b8] mt-2">بعد الدفع، اضغط الزر لإرسال الإيصال وستحصل على كود التفعيل خلال دقائق</p>
+      </div>
+      <button onclick="closePayModal()" class="btn btn-outline w-full justify-center mt-2">إغلاق</button>
+    </div>
+  </div>
+</div>`, `<script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+<script>
+let curCourse='',curName='',curPrice=0,curMethod='';
+
+// Generate QR codes for payment page
+window.addEventListener('load',()=>{
+  if(document.getElementById('qrZain')){
+    QRCode.toCanvas(document.createElement('canvas'),'zaincash://transfer?number=0798919150&name=YamenGuide',{width:120,margin:1},function(err,canvas){if(!err){canvas.className='rounded-lg mx-auto';document.getElementById('qrZain').appendChild(canvas);}});
+  }
+  if(document.getElementById('qrCliq')){
+    QRCode.toCanvas(document.createElement('canvas'),'cliq://pay?alias=0798919150&bank=JIB&name=YamenGuide',{width:120,margin:1},function(err,canvas){if(!err){canvas.className='rounded-lg mx-auto';document.getElementById('qrCliq').appendChild(canvas);}});
+  }
+});
+
+function buyNow(code,name,price){
+  curCourse=code;curName=name;curPrice=price;
+  document.getElementById('payModalTitle').textContent='شراء: '+name;
+  document.getElementById('payModalCourse').textContent='السعر: '+price+' دينار أردني';
+  document.getElementById('payDetails').classList.add('hidden');
+  document.getElementById('payModal').classList.remove('hidden');
+  const colors={IELTS:'#0ea5e9',TOEFL:'#ef4444',FOUNDATIONS:'#8b5cf6',PRIVATE:'#f59e0b'};
+  const ct=code.split('_')[0];
+  document.getElementById('payModalHeader').style.background=colors[ct]||'#3b82f6';
+}
+function selectPay(method){
+  curMethod=method;
+  document.querySelectorAll('#payModal .border-2').forEach(el=>el.classList.remove('border-[#3b82f6]'));
+  event.currentTarget.classList.add('border-[#3b82f6]');
+  document.getElementById('payMethod').textContent=method==='zaincash'?'📱 Zain Cash – تحويل مباشر':'🏦 CliQ – البنك الإسلامي الأردني';
+  document.getElementById('payAmount').textContent=curPrice+' د.أ';
+  document.getElementById('payDetails').classList.remove('hidden');
+}
+function sendToWhatsApp(){
+  const msg=encodeURIComponent('مرحباً 👋\nأريد تفعيل: '+curName+'\nالمبلغ: '+curPrice+' د.أ\nطريقة الدفع: '+(curMethod==='zaincash'?'Zain Cash':'CliQ')+'\n[أرفق صورة الإيصال هنا]');
+  window.open('https://wa.me/962798919150?text='+msg,'_blank');
+  fetch('/api/payment-request',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({course_code:curCourse,payment_method:curMethod})}).catch(()=>{});
+}
+function closePayModal(){document.getElementById('payModal').classList.add('hidden');}
+</script>`))
+})
+
+// ACTIVATE PAGE
+app.get('/activate', async (c) => {
+  const user = await getUser(c)
+  if (!user) return c.redirect('/login')
+  return c.html(L('تفعيل مسار', `
+<nav class="navbar">
+  <a href="/dashboard" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-3">
+    <a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>لوحتي</a>
+    <button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>
+  </div>
+</nav>
+<div class="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-[#f8fafc] to-[#e0f2fe]">
+  <div class="w-full max-w-md">
+    <div class="text-center mb-8">
+      <div class="inline-flex items-center justify-center w-20 h-20 bg-[#1a2b4a] rounded-2xl mb-4 shadow-xl">
+        <i class="fas fa-key text-[#f59e0b] text-3xl"></i>
+      </div>
+      <h1 class="text-2xl font-bold text-[#1a2b4a]">تفعيل المسار</h1>
+      <p class="text-[#475569] mt-1">أدخل كود التفعيل الخاص بك</p>
+    </div>
+    <div class="card shadow-xl">
+      <div class="mb-6">
+        <label class="block text-sm font-semibold text-[#475569] mb-2">كود التفعيل</label>
+        <input id="codeInput" type="text" class="input text-center font-mono text-xl tracking-widest uppercase" placeholder="XXXX-XXXX" maxlength="9" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9-]/g,'')"/>
+        <p class="text-xs text-[#94a3b8] mt-2 text-center">الكود مكوّن من 8 أحرف بالصيغة XXXX-XXXX</p>
+      </div>
+      <div id="actError" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg mb-4"></div>
+      <div id="actSuccess" class="hidden text-green-700 text-sm bg-green-50 p-3 rounded-lg mb-4"></div>
+      <button onclick="activateCourse()" id="actBtn" class="btn btn-primary w-full justify-center py-3 text-base">
+        <i class="fas fa-unlock-alt"></i> تفعيل المسار
+      </button>
+      <div class="mt-4 pt-4 border-t border-[#f1f5f9] text-center">
+        <p class="text-sm text-[#475569] mb-2">لا تملك كود؟</p>
+        <a href="/courses" class="btn btn-outline text-sm mr-2"><i class="fas fa-tag"></i> عرض الأسعار</a>
+        <a href="https://wa.me/962798919150?text=أريد شراء كود تفعيل" target="_blank" class="btn btn-wa text-sm"><i class="fab fa-whatsapp"></i> شراء الكود</a>
+      </div>
+    </div>
+  </div>
+</div>`, `<script>
+async function activateCourse(){
+  const code=document.getElementById('codeInput').value.trim();
+  const err=document.getElementById('actError'),suc=document.getElementById('actSuccess'),btn=document.getElementById('actBtn');
+  err.classList.add('hidden');suc.classList.add('hidden');
+  if(code.length<8){err.textContent='الرجاء إدخال الكود كاملاً';err.classList.remove('hidden');return;}
+  btn.disabled=true;btn.innerHTML='<i class="fas fa-spinner fa-spin"></i> جارٍ التفعيل...';
+  try{
+    const r=await fetch('/api/activate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code})});
+    const d=await r.json();
+    if(d.success){
+      suc.textContent='✅ تم تفعيل: '+d.course_name+' بنجاح!';
+      suc.classList.remove('hidden');
+      sessionStorage.setItem('welcome_msg',JSON.stringify({title:'🎉 تم تفعيل '+d.course_name,msg:d.welcome_message}));
+      setTimeout(()=>window.location.href='/dashboard',1500);
+    }else{err.textContent=d.error;err.classList.remove('hidden');}
+  }catch(e){err.textContent='خطأ في الاتصال، حاول مجدداً';}
+  finally{btn.disabled=false;btn.innerHTML='<i class="fas fa-unlock-alt"></i> تفعيل المسار';}
+}
+document.getElementById('codeInput').addEventListener('keydown',e=>{if(e.key==='Enter')activateCourse();});
+</script>`))
+})
+
+// PRACTICE PAGE (kept from original, updated)
 app.get('/practice', async (c) => {
   const user = await getUser(c)
   if (!user) return c.redirect('/login')
-
-  return c.html(getLayout('Practice', `
-    <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
-      <div class="flex items-center gap-4">
-        <a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>Dashboard</a>
-        <span class="text-[#94a3b8] text-sm hidden sm:block">${user.name}</span>
-        <button onclick="logout()" class="btn-secondary text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>
+  return c.html(L('الاختبارات التدريبية', `
+<nav class="navbar">
+  <a href="/dashboard" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-3">
+    <a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>لوحتي</a>
+    <button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>
+  </div>
+</nav>
+<div class="max-w-5xl mx-auto p-4 md:p-6">
+  <div class="flex items-center gap-3 mb-6">
+    <a href="/dashboard" class="text-[#94a3b8] hover:text-[#1a2b4a]"><i class="fas fa-chevron-right"></i></a>
+    <h1 class="text-2xl font-bold text-[#1a2b4a]">الاختبارات التدريبية</h1>
+  </div>
+  <div class="flex gap-3 mb-6">
+    <button id="tTOEFL" onclick="setExam('TOEFL')" class="tab-btn active">TOEFL iBT</button>
+    <button id="tIELTS" onclick="setExam('IELTS')" class="tab-btn">IELTS</button>
+  </div>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+    ${[['reading','fa-book-open','#f59e0b','Reading','قراءة'],['listening','fa-headphones','#8b5cf6','Listening','استماع'],['speaking','fa-microphone','#ef4444','Speaking','تحدث'],['writing','fa-pen-nib','#10b981','Writing','كتابة']].map(([m,ic,col,en,ar])=>`
+    <div class="card course-card cursor-pointer" onclick="goExam('${m}')" style="--c:${col}">
+      <div class="w-12 h-12 rounded-xl flex items-center justify-center mb-3" style="background:${col}20">
+        <i class="fas ${ic} text-xl" style="color:${col}"></i>
       </div>
-    </nav>
-    <div class="max-w-5xl mx-auto p-6">
-      <div class="flex items-center gap-3 mb-6">
-        <a href="/dashboard" class="text-[#94a3b8] hover:text-[#1a2b4a]"><i class="fas fa-chevron-left"></i></a>
-        <h1 class="text-2xl font-bold text-[#1a2b4a]">Select Practice Test</h1>
+      <h3 class="font-bold text-[#1a2b4a]">${en}</h3>
+      <p class="text-xs text-[#94a3b8] mt-1">${ar}</p>
+      <div class="mt-3 pt-3 border-t border-[#f1f5f9]">
+        <span class="btn text-xs py-1.5 px-3 w-full justify-center" style="background:${col};color:white">ابدأ <i class="fas fa-arrow-left mr-1"></i></span>
       </div>
-      
-      <!-- Exam Type Tabs -->
-      <div class="flex gap-3 mb-6">
-        <button id="toeflTab" onclick="selectExam('TOEFL')" class="exam-tab toefl active">
-          <i class="fas fa-university mr-2"></i>TOEFL iBT
-        </button>
-        <button id="ieltsTab" onclick="selectExam('IELTS')" class="exam-tab ielts">
-          <i class="fas fa-globe mr-2"></i>IELTS Academic
-        </button>
-      </div>
-
-      <div id="examInfo" class="card mb-6 bg-[#f0f7ff] border-[#bfdbfe]">
-        <div class="flex items-start gap-4">
-          <i class="fas fa-info-circle text-[#3b82f6] text-xl mt-0.5"></i>
-          <div>
-            <h3 class="font-bold text-[#1e40af]" id="examTitle">TOEFL iBT Overview</h3>
-            <p class="text-sm text-[#475569] mt-1" id="examDesc">The TOEFL iBT measures academic English skills across four areas. Total score: 0-120. Each section scored 0-30.</p>
-            <div class="flex flex-wrap gap-3 mt-2 text-sm text-[#475569]" id="examDetails">
-              <span><i class="fas fa-clock mr-1 text-[#3b82f6]"></i>About 3 hours total</span>
-              <span><i class="fas fa-star mr-1 text-[#f59e0b]"></i>Score: 0–120</span>
-              <span><i class="fas fa-globe mr-1 text-[#10b981]"></i>Accepted globally</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Module Selection -->
-      <h2 class="text-lg font-bold text-[#1a2b4a] mb-4">Select Module</h2>
-      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4" id="moduleGrid">
-        <div class="card module-card reading cursor-pointer" onclick="startPractice('reading')">
-          <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-[#fef3c7] flex items-center justify-center">
-              <i class="fas fa-book-open text-[#f59e0b]"></i>
-            </div>
-            <span class="font-bold text-[#1a2b4a]">Reading</span>
-          </div>
-          <p class="text-xs text-[#94a3b8] mb-3">Read academic passages and answer comprehension questions</p>
-          <div class="text-xs text-[#475569]">
-            <div><i class="fas fa-clock mr-1"></i>54-72 min</div>
-            <div class="mt-1"><i class="fas fa-list mr-1"></i>3-4 passages</div>
-          </div>
-          <div class="mt-3 pt-3 border-t border-[#f1f5f9]">
-            <span class="btn-primary text-xs py-1.5 px-3 w-full justify-center">Start Practice <i class="fas fa-arrow-right"></i></span>
-          </div>
-        </div>
-        
-        <div class="card module-card listening cursor-pointer" onclick="startPractice('listening')">
-          <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-[#ede9fe] flex items-center justify-center">
-              <i class="fas fa-headphones text-[#8b5cf6]"></i>
-            </div>
-            <span class="font-bold text-[#1a2b4a]">Listening</span>
-          </div>
-          <p class="text-xs text-[#94a3b8] mb-3">Listen to lectures and conversations, then answer questions</p>
-          <div class="text-xs text-[#475569]">
-            <div><i class="fas fa-clock mr-1"></i>41-57 min</div>
-            <div class="mt-1"><i class="fas fa-list mr-1"></i>4-6 audio clips</div>
-          </div>
-          <div class="mt-3 pt-3 border-t border-[#f1f5f9]">
-            <span class="btn-primary text-xs py-1.5 px-3 w-full justify-center">Start Practice <i class="fas fa-arrow-right"></i></span>
-          </div>
-        </div>
-        
-        <div class="card module-card speaking cursor-pointer" onclick="startPractice('speaking')">
-          <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-[#fee2e2] flex items-center justify-center">
-              <i class="fas fa-microphone text-[#ef4444]"></i>
-            </div>
-            <span class="font-bold text-[#1a2b4a]">Speaking</span>
-          </div>
-          <p class="text-xs text-[#94a3b8] mb-3">Respond to prompts and demonstrate spoken English skills</p>
-          <div class="text-xs text-[#475569]">
-            <div><i class="fas fa-clock mr-1"></i>17 min</div>
-            <div class="mt-1"><i class="fas fa-list mr-1"></i>4 tasks</div>
-          </div>
-          <div class="mt-3 pt-3 border-t border-[#f1f5f9]">
-            <span class="btn-primary text-xs py-1.5 px-3 w-full justify-center">Start Practice <i class="fas fa-arrow-right"></i></span>
-          </div>
-        </div>
-        
-        <div class="card module-card writing cursor-pointer" onclick="startPractice('writing')">
-          <div class="flex items-center gap-3 mb-3">
-            <div class="w-10 h-10 rounded-lg bg-[#ecfdf5] flex items-center justify-center">
-              <i class="fas fa-pen-nib text-[#10b981]"></i>
-            </div>
-            <span class="font-bold text-[#1a2b4a]">Writing</span>
-          </div>
-          <p class="text-xs text-[#94a3b8] mb-3">Write essays and integrated responses demonstrating academic writing</p>
-          <div class="text-xs text-[#475569]">
-            <div><i class="fas fa-clock mr-1"></i>50 min</div>
-            <div class="mt-1"><i class="fas fa-list mr-1"></i>2 tasks</div>
-          </div>
-          <div class="mt-3 pt-3 border-t border-[#f1f5f9]">
-            <span class="btn-primary text-xs py-1.5 px-3 w-full justify-center">Start Practice <i class="fas fa-arrow-right"></i></span>
-          </div>
-        </div>
-      </div>
-    </div>
-  `, `<script>
-    let currentExam = 'TOEFL';
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('type')) currentExam = params.get('type');
-    
-    const examInfo = {
-      TOEFL: { title: 'TOEFL iBT Overview', desc: 'The TOEFL iBT measures academic English skills across four areas. Total score: 0-120. Each section scored 0-30.', details: '<span><i class="fas fa-clock mr-1 text-[#3b82f6]"></i>About 3 hours total</span><span><i class="fas fa-star mr-1 text-[#f59e0b]"></i>Score: 0–120</span><span><i class="fas fa-globe mr-1 text-[#10b981]"></i>Accepted globally</span>' },
-      IELTS: { title: 'IELTS Academic Overview', desc: 'IELTS Academic measures English proficiency for academic purposes. Band scores from 1-9. Most universities require 6.5+.', details: '<span><i class="fas fa-clock mr-1 text-[#3b82f6]"></i>About 2 hrs 45 min</span><span><i class="fas fa-star mr-1 text-[#f59e0b]"></i>Band: 1–9</span><span><i class="fas fa-globe mr-1 text-[#10b981]"></i>160+ countries</span>' }
-    };
-    
-    function selectExam(type) {
-      currentExam = type;
-      document.getElementById('toeflTab').className = 'exam-tab toefl ' + (type === 'TOEFL' ? 'active' : '');
-      document.getElementById('ieltsTab').className = 'exam-tab ielts ' + (type === 'IELTS' ? 'active' : '');
-      const info = examInfo[type];
-      document.getElementById('examTitle').textContent = info.title;
-      document.getElementById('examDesc').textContent = info.desc;
-      document.getElementById('examDetails').innerHTML = info.details;
-    }
-    
-    function startPractice(module) {
-      window.location.href = '/exam?type=' + currentExam + '&module=' + module;
-    }
-    
-    function logout() { fetch('/api/auth/logout', {method:'POST'}).then(() => window.location.href = '/login'); }
-    
-    // Set initial tab from URL params
-    if (params.get('type') === 'IELTS') selectExam('IELTS');
-    if (params.get('module')) startPractice(params.get('module'));
-  </script>`))
+    </div>`).join('')}
+  </div>
+</div>`, `<script>
+let curExam=new URLSearchParams(location.search).get('type')||'TOEFL';
+function setExam(e){curExam=e;document.getElementById('tTOEFL').className='tab-btn'+(e==='TOEFL'?' active':'');document.getElementById('tIELTS').className='tab-btn'+(e==='IELTS'?' active':'');}
+function goExam(m){window.location='/exam?type='+curExam+'&module='+m;}
+if(curExam==='IELTS'){setExam('IELTS');}
+</script>`))
 })
 
-// Exam/Practice Page
+// EXAM PAGE (full timer simulation)
 app.get('/exam', async (c) => {
   const user = await getUser(c)
   if (!user) return c.redirect('/login')
-
-  return c.html(getLayout('Practice Exam', `
-    <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
-      <div class="flex items-center gap-4">
-        <div id="timerDisplay" class="flex items-center gap-2 bg-[#0f1e35] px-4 py-2 rounded-lg">
-          <i class="fas fa-clock text-[#f59e0b]"></i>
-          <span class="text-white font-mono font-bold text-lg" id="timerText">--:--</span>
-        </div>
-        <button onclick="confirmExit()" class="btn-danger text-sm py-2 px-3"><i class="fas fa-times mr-1"></i>Exit</button>
+  return c.html(L('اختبار تدريبي', `
+<nav class="navbar">
+  <a href="/dashboard" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-4">
+    <div id="timerBox" class="flex items-center gap-2 bg-[#0f1e35] px-4 py-2 rounded-lg">
+      <i class="fas fa-clock text-[#f59e0b]"></i>
+      <span class="text-white font-mono font-bold text-lg" id="timerTxt">--:--</span>
+    </div>
+    <button onclick="confirmExit()" class="btn text-sm py-2 px-3" style="background:#ef4444;color:white"><i class="fas fa-times mr-1"></i>خروج</button>
+  </div>
+</nav>
+<div class="w-full bg-[#e2e8f0]"><div id="timerBar" style="height:4px;width:100%;background:linear-gradient(90deg,#10b981,#3b82f6);transition:width 1s linear"></div></div>
+<div class="max-w-4xl mx-auto p-4 md:p-6">
+  <div id="loadState" class="text-center py-20">
+    <div class="w-12 h-12 border-4 border-[#3b82f6] border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+    <p class="text-[#475569]">جارٍ تحميل الأسئلة...</p>
+  </div>
+  <div id="qArea" class="hidden">
+    <div class="flex items-center justify-between mb-4">
+      <div class="flex items-center gap-3">
+        <span id="examBadge" class="badge badge-toefl">TOEFL</span>
+        <span id="modBadge" class="badge" style="background:#fef3c7;color:#92400e">Reading</span>
+        <span class="text-sm text-[#475569]">سؤال <span id="qNum">1</span> من <span id="qTot">-</span></span>
       </div>
-    </nav>
-    <div id="timerBarContainer" class="w-full bg-[#e2e8f0]"><div id="timerBar" class="timer-bar" style="width:100%;height:4px"></div></div>
-    
-    <div class="max-w-4xl mx-auto p-4 md:p-6">
-      <!-- Loading State -->
-      <div id="loadingState" class="text-center py-20">
-        <div class="inline-block w-12 h-12 border-4 border-[#3b82f6] border-t-transparent rounded-full animate-spin mb-4"></div>
-        <p class="text-[#475569]">Loading your practice questions...</p>
-      </div>
-
-      <!-- Question Area -->
-      <div id="questionArea" class="hidden">
-        <!-- Progress Header -->
-        <div class="flex items-center justify-between mb-4">
-          <div class="flex items-center gap-3">
-            <span id="examBadge" class="badge-toefl">TOEFL</span>
-            <span id="moduleBadge" class="badge-reading">Reading</span>
-            <span class="text-sm text-[#475569]">Question <span id="qNum">1</span> of <span id="qTotal">-</span></span>
-          </div>
-          <div class="flex gap-1" id="progressDots"></div>
-        </div>
-
-        <!-- Passage (if applicable) -->
-        <div id="passageArea" class="card mb-4 hidden">
-          <h3 class="font-bold text-[#1a2b4a] mb-2 flex items-center gap-2">
-            <i class="fas fa-file-alt text-[#f59e0b]"></i> Reading Passage
-          </h3>
-          <div id="passageText" class="text-sm leading-relaxed text-[#475569] max-h-64 overflow-y-auto pr-2"></div>
-        </div>
-
-        <!-- Question -->
-        <div class="card mb-4">
-          <div class="flex items-start gap-3 mb-4">
-            <div class="w-8 h-8 rounded-full bg-[#1a2b4a] text-white flex items-center justify-center flex-shrink-0 font-bold text-sm" id="qNumCircle">1</div>
-            <div>
-              <p class="text-xs text-[#94a3b8] uppercase tracking-wider mb-1" id="qType">Multiple Choice</p>
-              <p class="font-semibold text-[#1a2b4a] text-base leading-snug" id="qTitle">Loading...</p>
-            </div>
-          </div>
-          <div class="ml-11">
-            <p class="text-[#475569] mb-4 text-sm leading-relaxed" id="qContent"></p>
-            
-            <!-- Multiple Choice Options -->
-            <div id="optionsArea" class="space-y-2"></div>
-            
-            <!-- Writing/Speaking Text Area -->
-            <div id="textareaArea" class="hidden">
-              <div class="flex items-center justify-between mb-2">
-                <label class="text-sm font-semibold text-[#475569]">Your Response</label>
-                <span class="text-xs text-[#94a3b8]" id="wordCount">0 words</span>
-              </div>
-              <textarea id="userResponse" class="answer-area" placeholder="Begin typing your response here..."></textarea>
-              <div class="flex items-center gap-4 mt-2 text-xs text-[#94a3b8]">
-                <span><i class="fas fa-keyboard mr-1"></i>Auto-saved</span>
-                <span id="minWordGuide"></span>
-              </div>
-            </div>
-
-            <!-- Speaking Area -->
-            <div id="speakingArea" class="hidden">
-              <div class="bg-[#f8fafc] rounded-xl p-6 text-center">
-                <div id="speakingPrepTimer" class="mb-4">
-                  <p class="text-sm text-[#475569] mb-2">Preparation Time</p>
-                  <div class="text-4xl font-mono font-bold text-[#1a2b4a]" id="prepTimerText">0:15</div>
-                </div>
-                <div id="recordingState" class="hidden">
-                  <div class="w-20 h-20 rounded-full bg-[#fee2e2] flex items-center justify-center mx-auto mb-4 cursor-pointer" id="micButton" onclick="toggleRecording()">
-                    <i class="fas fa-microphone text-[#ef4444] text-3xl recording-dot" id="micIcon"></i>
-                  </div>
-                  <p class="font-semibold text-[#1a2b4a]" id="recordingStatus">Click to Start Recording</p>
-                  <p class="text-sm text-[#94a3b8] mt-1" id="recordingTime">Response time: <span id="respTimeLeft">0:45</span></p>
-                </div>
-                <textarea id="speakingNotes" class="answer-area mt-4" style="min-height:80px" placeholder="Optional: Write key points for your speaking response..."></textarea>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Feedback Area -->
-        <div id="feedbackArea" class="hidden card mb-4 border-l-4">
-          <div class="flex items-start gap-3">
-            <i id="feedbackIcon" class="fas fa-check-circle text-2xl mt-0.5"></i>
-            <div>
-              <h4 id="feedbackTitle" class="font-bold"></h4>
-              <p id="feedbackText" class="text-sm mt-1 text-[#475569]"></p>
-              <p id="feedbackExplanation" class="text-sm mt-2 text-[#475569]"></p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Navigation -->
-        <div class="flex justify-between items-center">
-          <button onclick="prevQuestion()" id="prevBtn" class="btn-secondary" style="visibility:hidden"><i class="fas fa-arrow-left"></i> Previous</button>
-          <button onclick="nextQuestion()" id="nextBtn" class="btn-primary">Next <i class="fas fa-arrow-right"></i></button>
-          <button onclick="submitExam()" id="submitBtn" class="btn-primary hidden" style="background:#10b981"><i class="fas fa-check"></i> Submit Test</button>
+      <div class="flex gap-1" id="dots"></div>
+    </div>
+    <div id="passageBox" class="card mb-4 hidden">
+      <h3 class="font-bold text-[#1a2b4a] mb-2 flex items-center gap-2"><i class="fas fa-file-alt text-[#f59e0b]"></i> النص</h3>
+      <div id="passageTxt" class="text-sm leading-relaxed text-[#475569] max-h-64 overflow-y-auto pr-2"></div>
+    </div>
+    <div class="card mb-4">
+      <div class="flex items-start gap-3 mb-4">
+        <div class="w-8 h-8 rounded-full bg-[#1a2b4a] text-white flex items-center justify-center flex-shrink-0 font-bold text-sm" id="qNumCircle">1</div>
+        <div>
+          <p class="text-xs text-[#94a3b8] uppercase tracking-wider mb-1" id="qTypeTxt">اختيار من متعدد</p>
+          <p class="font-semibold text-[#1a2b4a] text-base leading-snug" id="qTitle">...</p>
         </div>
       </div>
-
-      <!-- Results Screen -->
-      <div id="resultsArea" class="hidden">
-        <div class="text-center py-8">
-          <div class="w-24 h-24 rounded-full bg-[#dbeafe] flex items-center justify-center mx-auto mb-6">
-            <i class="fas fa-trophy text-[#f59e0b] text-4xl"></i>
-          </div>
-          <h1 class="text-3xl font-bold text-[#1a2b4a] mb-2">Practice Complete!</h1>
-          <p class="text-[#475569]">Here's how you performed</p>
+      <div class="mr-11">
+        <p class="text-[#475569] mb-4 text-sm leading-relaxed whitespace-pre-line" id="qContent"></p>
+        <div id="optsArea" class="space-y-2"></div>
+        <div id="taArea" class="hidden">
+          <div class="flex justify-between mb-2"><label class="text-sm font-semibold text-[#475569]">إجابتك</label><span class="text-xs text-[#94a3b8]" id="wc">0 كلمة</span></div>
+          <textarea id="userResp" class="w-full border-2 border-[#e2e8f0] rounded-lg p-4 text-sm leading-relaxed min-h-48 resize-y focus:outline-none focus:border-[#3b82f6]" placeholder="اكتب إجابتك هنا..."></textarea>
         </div>
-        
-        <div class="grid md:grid-cols-3 gap-4 mb-8">
-          <div class="stat-card text-center" style="border-color:#f59e0b">
-            <div class="text-3xl font-bold text-[#1a2b4a]" id="finalScore">-</div>
-            <div class="text-sm text-[#475569] mt-1">Final Score</div>
+        <div id="spkArea" class="hidden text-center">
+          <div id="prepDiv" class="mb-4"><p class="text-sm text-[#475569] mb-2">وقت التحضير</p><div class="text-4xl font-mono font-bold text-[#1a2b4a]" id="prepTxt">0:15</div></div>
+          <div id="recDiv" class="hidden">
+            <div class="w-20 h-20 rounded-full bg-[#fee2e2] flex items-center justify-center mx-auto mb-4 cursor-pointer" onclick="toggleRec()">
+              <i class="fas fa-microphone text-[#ef4444] text-3xl pulse" id="micIco"></i>
+            </div>
+            <p class="font-semibold text-[#1a2b4a]" id="recStatus">اضغط للتسجيل</p>
+            <p class="text-sm text-[#94a3b8] mt-1">وقت الإجابة: <span id="respLeft">0:45</span></p>
           </div>
-          <div class="stat-card text-center" style="border-color:#10b981">
-            <div class="text-3xl font-bold text-[#1a2b4a]" id="finalPct">-</div>
-            <div class="text-sm text-[#475569] mt-1">Percentage</div>
-          </div>
-          <div class="stat-card text-center" style="border-color:#8b5cf6">
-            <div class="text-3xl font-bold text-[#1a2b4a]" id="finalTime">-</div>
-            <div class="text-sm text-[#475569] mt-1">Time Taken</div>
-          </div>
-        </div>
-
-        <div class="card mb-6" id="reviewArea"></div>
-
-        <div class="flex gap-3 justify-center">
-          <a href="/practice" class="btn-secondary"><i class="fas fa-redo"></i> Try Another</a>
-          <a href="/dashboard" class="btn-primary"><i class="fas fa-home"></i> Dashboard</a>
-          <a href="/progress" class="btn-primary" style="background:#10b981"><i class="fas fa-chart-line"></i> View Progress</a>
+          <textarea id="spkNotes" class="w-full border-2 border-[#e2e8f0] rounded-lg p-3 text-sm mt-4 min-h-20 resize-none focus:outline-none focus:border-[#3b82f6]" placeholder="ملاحظات اختيارية..."></textarea>
         </div>
       </div>
     </div>
-  `, `<script>
-    const params = new URLSearchParams(window.location.search);
-    const examType = params.get('type') || 'TOEFL';
-    const module = params.get('module') || 'reading';
-    
-    let questions = [], currentQ = 0, sessionId = null;
-    let timerInterval = null, timeLeft = 0, totalTime = 0;
-    let startTime = Date.now(), answers = {};
-    let speakingPrepTimer = null, speakingRespTimer = null;
-    let isRecording = false;
-
-    const moduleTimeLimits = { reading: 1200, listening: 600, speaking: 90, writing: 1800 };
-    const moduleColors = { reading: 'badge-reading', listening: 'badge-listening', speaking: 'badge-speaking', writing: 'badge-writing' };
-    const moduleIcons = { reading: 'fa-book-open', listening: 'fa-headphones', speaking: 'fa-microphone', writing: 'fa-pen-nib' };
-
-    async function init() {
-      // Set badges
-      document.getElementById('examBadge').textContent = examType;
-      document.getElementById('examBadge').className = examType === 'TOEFL' ? 'badge-toefl' : 'badge-ielts';
-      document.getElementById('moduleBadge').textContent = module.charAt(0).toUpperCase() + module.slice(1);
-      document.getElementById('moduleBadge').className = moduleColors[module] || 'badge-reading';
-
-      try {
-        // Start session
-        const sRes = await fetch('/api/sessions/start', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ exam_type: examType, module })
-        });
-        const sData = await sRes.json();
-        sessionId = sData.session_id;
-
-        // Fetch questions
-        const qRes = await fetch('/api/questions?exam_type=' + examType + '&module=' + module + '&limit=5');
-        const qData = await qRes.json();
-        questions = qData.questions || [];
-
-        if (questions.length === 0) {
-          document.getElementById('loadingState').innerHTML = '<div class="text-center py-20"><i class="fas fa-exclamation-circle text-4xl text-[#94a3b8] mb-4"></i><p class="text-[#475569]">No questions available for this module yet.</p><a href="/practice" class="btn-primary mt-4 inline-flex">Go Back</a></div>';
-          return;
-        }
-
-        document.getElementById('qTotal').textContent = questions.length;
-        buildProgressDots();
-        document.getElementById('loadingState').classList.add('hidden');
-        document.getElementById('questionArea').classList.remove('hidden');
-        
-        showQuestion(0);
-        startTimer();
-      } catch(e) {
-        document.getElementById('loadingState').innerHTML = '<div class="text-center py-20"><i class="fas fa-exclamation-circle text-4xl text-red-400 mb-4"></i><p class="text-red-500">Failed to load questions. Please try again.</p><a href="/practice" class="btn-primary mt-4 inline-flex">Go Back</a></div>';
-      }
-    }
-
-    function buildProgressDots() {
-      const container = document.getElementById('progressDots');
-      container.innerHTML = questions.map((_, i) => 
-        '<div class="w-2 h-2 rounded-full bg-[#e2e8f0] dot-' + i + '"></div>'
-      ).join('');
-    }
-
-    function updateProgressDot(i, status) {
-      const dot = document.querySelector('.dot-' + i);
-      if (!dot) return;
-      dot.className = 'w-2 h-2 rounded-full ' + 
-        (status === 'current' ? 'bg-[#3b82f6]' : status === 'correct' ? 'bg-[#10b981]' : status === 'incorrect' ? 'bg-[#ef4444]' : status === 'answered' ? 'bg-[#f59e0b]' : 'bg-[#e2e8f0]') + ' dot-' + i;
-    }
-
-    function startTimer() {
-      totalTime = moduleTimeLimits[module] * questions.length;
-      timeLeft = totalTime;
-      timerInterval = setInterval(tick, 1000);
-    }
-
-    function tick() {
-      timeLeft--;
-      const mins = Math.floor(timeLeft / 60);
-      const secs = timeLeft % 60;
-      document.getElementById('timerText').textContent = mins + ':' + String(secs).padStart(2,'0');
-      const pct = (timeLeft / totalTime) * 100;
-      const bar = document.getElementById('timerBar');
-      bar.style.width = pct + '%';
-      if (pct < 20) bar.className = 'timer-bar timer-warning';
-      if (pct < 10) document.getElementById('timerText').classList.add('text-red-400');
-      if (timeLeft <= 0) { clearInterval(timerInterval); submitExam(); }
-    }
-
-    function showQuestion(idx) {
-      currentQ = idx;
-      const q = questions[idx];
-      updateProgressDot(idx, 'current');
-      
-      document.getElementById('qNum').textContent = idx + 1;
-      document.getElementById('qNumCircle').textContent = idx + 1;
-      document.getElementById('qTitle').textContent = q.title;
-      document.getElementById('qType').textContent = q.question_type ? q.question_type.replace(/_/g,' ').toUpperCase() : 'QUESTION';
-      document.getElementById('qContent').textContent = q.content;
-      
-      // Show/hide passage
-      if (q.passage) {
-        document.getElementById('passageArea').classList.remove('hidden');
-        document.getElementById('passageText').textContent = q.passage;
-      } else { document.getElementById('passageArea').classList.add('hidden'); }
-
-      // Clear feedback
-      document.getElementById('feedbackArea').classList.add('hidden');
-
-      // Show appropriate input area
-      document.getElementById('optionsArea').classList.add('hidden');
-      document.getElementById('textareaArea').classList.add('hidden');
-      document.getElementById('speakingArea').classList.add('hidden');
-
-      if (module === 'speaking') {
-        document.getElementById('speakingArea').classList.remove('hidden');
-        startSpeakingSession(q);
-      } else if (module === 'writing') {
-        document.getElementById('textareaArea').classList.remove('hidden');
-        const ta = document.getElementById('userResponse');
-        ta.value = answers[idx] || '';
-        ta.addEventListener('input', () => {
-          answers[idx] = ta.value;
-          const words = ta.value.trim().split(/\\s+/).filter(w => w.length > 0).length;
-          document.getElementById('wordCount').textContent = words + ' words';
-        });
-        document.getElementById('minWordGuide').textContent = q.content.includes('250') ? 'Minimum: 250 words' : 'Minimum: 150 words';
-      } else if (q.options) {
-        document.getElementById('optionsArea').classList.remove('hidden');
-        const opts = typeof q.options === 'string' ? JSON.parse(q.options) : q.options;
-        const labels = ['A', 'B', 'C', 'D', 'E'];
-        document.getElementById('optionsArea').innerHTML = opts.map((opt, i) =>
-          '<button class="option-btn ' + (answers[idx] === opt ? 'selected' : '') + '" onclick="selectOption(this, \'' + opt.replace(/'/g, "\\'") + '\')" data-value="' + opt.replace(/"/g, '&quot;') + '">' +
-          '<span class="w-6 h-6 rounded-full border-2 flex-shrink-0 flex items-center justify-center text-xs font-bold border-current">' + labels[i] + '</span>' +
-          '<span>' + opt + '</span></button>'
-        ).join('');
-      }
-
-      // Navigation buttons
-      document.getElementById('prevBtn').style.visibility = idx > 0 ? 'visible' : 'hidden';
-      document.getElementById('nextBtn').classList.toggle('hidden', idx >= questions.length - 1);
-      document.getElementById('submitBtn').classList.toggle('hidden', idx < questions.length - 1);
-    }
-
-    function selectOption(btn, value) {
-      document.querySelectorAll('.option-btn').forEach(b => b.classList.remove('selected'));
-      btn.classList.add('selected');
-      answers[currentQ] = value;
-    }
-
-    async function nextQuestion() {
-      await submitCurrentAnswer();
-      if (currentQ < questions.length - 1) showQuestion(currentQ + 1);
-    }
-
-    function prevQuestion() {
-      if (currentQ > 0) showQuestion(currentQ - 1);
-    }
-
-    async function submitCurrentAnswer() {
-      if (!sessionId) return;
-      const q = questions[currentQ];
-      const answer = answers[currentQ] || (module === 'writing' ? document.getElementById('userResponse')?.value : null) || (module === 'speaking' ? document.getElementById('speakingNotes')?.value : null);
-      if (!answer) return;
-
-      const timeTaken = Math.round((Date.now() - startTime) / 1000);
-      try {
-        const res = await fetch('/api/sessions/' + sessionId + '/answer', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ question_id: q.id, answer, time_spent: timeTaken })
-        });
-        const data = await res.json();
-        
-        if (data.is_correct !== null) {
-          const fb = document.getElementById('feedbackArea');
-          fb.classList.remove('hidden');
-          if (data.is_correct) {
-            fb.className = 'card mb-4 border-l-4 border-green-500 bg-green-50';
-            fb.querySelector('#feedbackIcon').className = 'fas fa-check-circle text-2xl mt-0.5 text-green-500';
-            document.getElementById('feedbackTitle').textContent = 'Correct! Well done!';
-            document.getElementById('feedbackTitle').className = 'font-bold text-green-700';
-          } else {
-            fb.className = 'card mb-4 border-l-4 border-red-500 bg-red-50';
-            fb.querySelector('#feedbackIcon').className = 'fas fa-times-circle text-2xl mt-0.5 text-red-500';
-            document.getElementById('feedbackTitle').textContent = 'Incorrect';
-            document.getElementById('feedbackTitle').className = 'font-bold text-red-700';
-            document.getElementById('feedbackText').textContent = 'Correct answer: ' + data.correct_answer;
-          }
-          document.getElementById('feedbackExplanation').textContent = data.explanation || '';
-          
-          // Update option styles
-          document.querySelectorAll('.option-btn').forEach(btn => {
-            if (btn.dataset.value === data.correct_answer) btn.className = 'option-btn correct';
-            else if (btn.classList.contains('selected')) btn.className = 'option-btn incorrect';
-          });
-          updateProgressDot(currentQ, data.is_correct ? 'correct' : 'incorrect');
-        } else {
-          updateProgressDot(currentQ, 'answered');
-        }
-      } catch(e) { console.error(e); }
-    }
-
-    async function submitExam() {
-      clearInterval(timerInterval);
-      if (speakingPrepTimer) clearInterval(speakingPrepTimer);
-      if (speakingRespTimer) clearInterval(speakingRespTimer);
-      
-      await submitCurrentAnswer();
-      
-      const timeTaken = Math.round((Date.now() - startTime) / 1000);
-      try {
-        const res = await fetch('/api/sessions/' + sessionId + '/complete', {
-          method: 'POST', headers: {'Content-Type':'application/json'},
-          body: JSON.stringify({ time_taken: timeTaken })
-        });
-        const data = await res.json();
-        showResults(data, timeTaken);
-      } catch(e) { showResults({ score: 0, max_score: 0 }, timeTaken); }
-    }
-
-    function showResults(data, timeTaken) {
-      document.getElementById('questionArea').classList.add('hidden');
-      document.getElementById('resultsArea').classList.remove('hidden');
-      
-      const score = data.score || 0;
-      const maxScore = data.max_score || 0;
-      const pct = maxScore > 0 ? Math.round((score / maxScore) * 100) : (module === 'writing' || module === 'speaking' ? 'N/A' : 0);
-      const mins = Math.floor(timeTaken / 60), secs = timeTaken % 60;
-      
-      document.getElementById('finalScore').textContent = maxScore > 0 ? score.toFixed(1) + ' / ' + maxScore.toFixed(1) : 'Submitted';
-      document.getElementById('finalPct').textContent = typeof pct === 'number' ? pct + '%' : pct;
-      document.getElementById('finalTime').textContent = mins + 'm ' + secs + 's';
-
-      // Performance message
-      let perfMsg = '', perfClass = '';
-      if (typeof pct === 'number') {
-        if (pct >= 80) { perfMsg = 'Excellent! You\'re well-prepared.'; perfClass = 'text-green-600'; }
-        else if (pct >= 60) { perfMsg = 'Good job! Keep practicing to improve.'; perfClass = 'text-yellow-600'; }
-        else { perfMsg = 'Keep studying! Review the explanations above.'; perfClass = 'text-red-600'; }
-      } else { perfMsg = 'Response submitted for review.'; perfClass = 'text-blue-600'; }
-
-      document.getElementById('reviewArea').innerHTML = 
-        '<h3 class="font-bold text-[#1a2b4a] mb-3">Performance Analysis</h3>' +
-        '<p class="' + perfClass + ' font-semibold mb-3">' + perfMsg + '</p>' +
-        '<div class="grid grid-cols-2 gap-3 text-sm">' +
-        '<div class="p-3 bg-[#f8fafc] rounded-lg"><span class="text-[#94a3b8]">Exam:</span> <span class="font-semibold">' + examType + '</span></div>' +
-        '<div class="p-3 bg-[#f8fafc] rounded-lg"><span class="text-[#94a3b8]">Module:</span> <span class="font-semibold capitalize">' + module + '</span></div>' +
-        '<div class="p-3 bg-[#f8fafc] rounded-lg"><span class="text-[#94a3b8]">Questions:</span> <span class="font-semibold">' + questions.length + '</span></div>' +
-        '<div class="p-3 bg-[#f8fafc] rounded-lg"><span class="text-[#94a3b8]">Time:</span> <span class="font-semibold">' + mins + 'm ' + secs + 's</span></div>' +
-        '</div>';
-    }
-
-    function startSpeakingSession(q) {
-      const prepTime = q.content.includes('15') ? 15 : q.content.includes('30') ? 30 : 60;
-      const respTime = q.time_limit || 60;
-      let prepLeft = prepTime;
-
-      document.getElementById('speakingPrepTimer').classList.remove('hidden');
-      document.getElementById('recordingState').classList.add('hidden');
-      document.getElementById('prepTimerText').textContent = '0:' + String(prepLeft).padStart(2,'0');
-
-      speakingPrepTimer = setInterval(() => {
-        prepLeft--;
-        document.getElementById('prepTimerText').textContent = '0:' + String(prepLeft).padStart(2,'0');
-        if (prepLeft <= 0) {
-          clearInterval(speakingPrepTimer);
-          document.getElementById('speakingPrepTimer').classList.add('hidden');
-          document.getElementById('recordingState').classList.remove('hidden');
-          startResponseTimer(respTime);
-        }
-      }, 1000);
-    }
-
-    function startResponseTimer(total) {
-      let left = total;
-      document.getElementById('respTimeLeft').textContent = '0:' + String(left).padStart(2,'0');
-      speakingRespTimer = setInterval(() => {
-        left--;
-        const m = Math.floor(left/60), s = left % 60;
-        document.getElementById('respTimeLeft').textContent = m + ':' + String(s).padStart(2,'0');
-        if (left <= 0) { clearInterval(speakingRespTimer); document.getElementById('recordingStatus').textContent = 'Time up!'; }
-      }, 1000);
-    }
-
-    function toggleRecording() {
-      isRecording = !isRecording;
-      const icon = document.getElementById('micIcon');
-      const status = document.getElementById('recordingStatus');
-      if (isRecording) {
-        icon.className = 'fas fa-stop text-[#ef4444] text-3xl';
-        status.textContent = 'Recording... Click to stop';
-        status.className = 'font-semibold text-red-600';
-      } else {
-        icon.className = 'fas fa-microphone text-[#ef4444] text-3xl recording-dot';
-        status.textContent = 'Recording stopped. Click to re-record.';
-        status.className = 'font-semibold text-[#475569]';
-        answers[currentQ] = document.getElementById('speakingNotes').value || 'Speaking response recorded';
-      }
-    }
-
-    function confirmExit() {
-      if (confirm('Are you sure you want to exit? Your progress will be lost.')) {
-        clearInterval(timerInterval);
-        window.location.href = '/practice';
-      }
-    }
-
-    init();
-  </script>`))
-})
-
-// Progress Page
-app.get('/progress', async (c) => {
-  const user = await getUser(c)
-  if (!user) return c.redirect('/login')
-
-  return c.html(getLayout('My Progress', `
-    <nav class="navbar">
-      <a href="/dashboard" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span></a>
-      <div class="flex items-center gap-4">
-        <a href="/dashboard" class="text-[#94a3b8] hover:text-white text-sm"><i class="fas fa-home mr-1"></i>Dashboard</a>
-        <span class="text-[#94a3b8] text-sm hidden sm:block">${user.name}</span>
-        <button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn-secondary text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i></button>
-      </div>
-    </nav>
-    <div class="max-w-5xl mx-auto p-6">
-      <div class="flex items-center gap-3 mb-6">
-        <a href="/dashboard" class="text-[#94a3b8] hover:text-[#1a2b4a]"><i class="fas fa-chevron-left"></i></a>
-        <h1 class="text-2xl font-bold text-[#1a2b4a]">My Progress</h1>
-      </div>
-
-      <!-- Overall Stats -->
-      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6" id="overallStats">
-        <div class="stat-card"><div class="text-2xl font-bold" id="pTotalSessions">-</div><div class="text-sm text-[#475569] mt-1">Total Tests</div></div>
-        <div class="stat-card" style="border-color:#f59e0b"><div class="text-2xl font-bold" id="pAvgScore">-</div><div class="text-sm text-[#475569] mt-1">Avg Score</div></div>
-        <div class="stat-card" style="border-color:#10b981"><div class="text-2xl font-bold" id="pStreak">-</div><div class="text-sm text-[#475569] mt-1">Day Streak</div></div>
-        <div class="stat-card" style="border-color:#8b5cf6"><div class="text-2xl font-bold" id="pModules">-</div><div class="text-sm text-[#475569] mt-1">Modules Practiced</div></div>
-      </div>
-
-      <!-- Module Breakdown -->
-      <div class="grid md:grid-cols-2 gap-6 mb-6">
-        <div class="card">
-          <h3 class="font-bold text-[#1a2b4a] mb-4"><i class="fas fa-chart-bar mr-2 text-[#3b82f6]"></i>Performance by Module</h3>
-          <div id="moduleBreakdown">
-            <div class="text-center py-8 text-[#94a3b8]"><i class="fas fa-chart-bar text-4xl mb-3"></i><p>Complete practice sessions to see your breakdown</p></div>
-          </div>
-        </div>
-        <div class="card">
-          <h3 class="font-bold text-[#1a2b4a] mb-4"><i class="fas fa-history mr-2 text-[#10b981]"></i>Recent Sessions</h3>
-          <div id="recentSessions">
-            <div class="text-center py-8 text-[#94a3b8]"><i class="fas fa-history text-4xl mb-3"></i><p>No sessions yet</p></div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Tips -->
-      <div class="card bg-gradient-to-r from-[#0f1e35] to-[#1a2b4a] text-white">
-        <h3 class="font-bold text-lg mb-4"><i class="fas fa-lightbulb text-[#f59e0b] mr-2"></i>Study Tips</h3>
-        <div class="grid md:grid-cols-2 gap-4 text-sm">
-          <div class="flex gap-3"><i class="fas fa-check-circle text-[#10b981] mt-0.5"></i><div><strong>Practice Daily</strong><p class="text-[#94a3b8] mt-0.5">Even 30 minutes of daily practice is more effective than long irregular sessions.</p></div></div>
-          <div class="flex gap-3"><i class="fas fa-check-circle text-[#10b981] mt-0.5"></i><div><strong>Review Mistakes</strong><p class="text-[#94a3b8] mt-0.5">Always read explanations for incorrect answers to understand the reasoning.</p></div></div>
-          <div class="flex gap-3"><i class="fas fa-check-circle text-[#10b981] mt-0.5"></i><div><strong>Simulate Real Conditions</strong><p class="text-[#94a3b8] mt-0.5">Practice with the timer to build speed and reduce exam anxiety.</p></div></div>
-          <div class="flex gap-3"><i class="fas fa-check-circle text-[#10b981] mt-0.5"></i><div><strong>Focus on Weak Areas</strong><p class="text-[#94a3b8] mt-0.5">Spend more time on modules where your score is below 70%.</p></div></div>
-        </div>
-      </div>
+    <div id="fbArea" class="hidden card mb-4 border-r-4"></div>
+    <div class="flex justify-between items-center">
+      <button onclick="prevQ()" id="prevBtn" class="btn btn-outline" style="visibility:hidden"><i class="fas fa-chevron-right"></i> السابق</button>
+      <button onclick="nextQ()" id="nextBtn" class="btn btn-primary">التالي <i class="fas fa-chevron-left"></i></button>
+      <button onclick="submitExam()" id="subBtn" class="hidden btn" style="background:#10b981;color:white"><i class="fas fa-check"></i> إنهاء الاختبار</button>
     </div>
-  `, `<script>
-    async function loadProgress() {
-      const r = await fetch('/api/dashboard/stats');
-      const d = await r.json();
-      
-      document.getElementById('pTotalSessions').textContent = d.total_sessions || 0;
-      document.getElementById('pAvgScore').textContent = (d.avg_score || 0) + '%';
-      document.getElementById('pStreak').textContent = d.streak_days || 0;
-      document.getElementById('pModules').textContent = d.module_stats ? d.module_stats.length : 0;
-
-      if (d.module_stats && d.module_stats.length > 0) {
-        const mbColors = { reading: '#f59e0b', listening: '#8b5cf6', speaking: '#ef4444', writing: '#10b981' };
-        document.getElementById('moduleBreakdown').innerHTML = d.module_stats.map(s => {
-          const pct = Math.round(s.avg_score || 0);
-          const color = mbColors[s.module] || '#3b82f6';
-          return '<div class="mb-4">' +
-            '<div class="flex justify-between text-sm mb-1">' +
-            '<span class="font-semibold capitalize">' + s.exam_type + ' - ' + s.module + '</span>' +
-            '<span class="font-bold" style="color:' + color + '">' + pct + '%</span></div>' +
-            '<div class="w-full bg-[#f1f5f9] rounded-full h-3">' +
-            '<div class="h-3 rounded-full transition-all duration-500" style="width:' + pct + '%;background:' + color + '"></div></div>' +
-            '<div class="text-xs text-[#94a3b8] mt-0.5">' + s.sessions + ' session(s) completed</div></div>';
-        }).join('');
-      }
-
-      if (d.recent_sessions && d.recent_sessions.length > 0) {
-        document.getElementById('recentSessions').innerHTML = d.recent_sessions.map(s => {
-          const pct = s.max_score > 0 ? Math.round((s.score / s.max_score) * 100) : null;
-          const scoreText = pct !== null ? pct + '%' : 'Submitted';
-          const color = pct >= 70 ? 'text-green-600' : pct >= 50 ? 'text-yellow-600' : 'text-red-600';
-          const date = s.completed_at ? new Date(s.completed_at).toLocaleDateString() : '';
-          return '<div class="flex items-center justify-between py-2 border-b border-[#f1f5f9] last:border-0">' +
-            '<div><span class="' + (s.exam_type === 'TOEFL' ? 'badge-toefl' : 'badge-ielts') + ' mr-2">' + s.exam_type + '</span>' +
-            '<span class="text-sm font-semibold capitalize">' + s.module + '</span>' +
-            '<span class="text-xs text-[#94a3b8] ml-2">' + date + '</span></div>' +
-            '<span class="font-bold ' + color + '">' + scoreText + '</span></div>';
-        }).join('');
-      }
-    }
-    loadProgress();
-  </script>`))
+  </div>
+  <div id="resArea" class="hidden">
+    <div class="text-center py-8">
+      <div class="w-24 h-24 rounded-full bg-[#dbeafe] flex items-center justify-center mx-auto mb-6"><i class="fas fa-trophy text-[#f59e0b] text-4xl"></i></div>
+      <h1 class="text-3xl font-bold text-[#1a2b4a] mb-2">انتهى الاختبار!</h1>
+    </div>
+    <div class="grid md:grid-cols-3 gap-4 mb-6">
+      <div class="card text-center border-r-4 border-[#f59e0b]"><div class="text-3xl font-bold text-[#1a2b4a]" id="rScore">-</div><div class="text-sm text-[#475569] mt-1">الدرجة</div></div>
+      <div class="card text-center border-r-4 border-[#10b981]"><div class="text-3xl font-bold text-[#1a2b4a]" id="rPct">-</div><div class="text-sm text-[#475569] mt-1">النسبة</div></div>
+      <div class="card text-center border-r-4 border-[#8b5cf6]"><div class="text-3xl font-bold text-[#1a2b4a]" id="rTime">-</div><div class="text-sm text-[#475569] mt-1">الوقت</div></div>
+    </div>
+    <div class="card mb-6" id="rReview"></div>
+    <div class="flex gap-3 justify-center flex-wrap">
+      <a href="/practice" class="btn btn-outline"><i class="fas fa-redo"></i> محاولة أخرى</a>
+      <a href="/dashboard" class="btn btn-primary"><i class="fas fa-home"></i> لوحة التحكم</a>
+    </div>
+  </div>
+</div>`, `<script>
+const params=new URLSearchParams(location.search);
+const examType=params.get('type')||'TOEFL',module=params.get('module')||'reading';
+let questions=[],curQ=0,sessionId=null,timerInt=null,timeLeft=0,totalTime=0,startTime=Date.now(),answers={},spkPrep=null,spkResp=null,isRec=false;
+const modColors={reading:'#f59e0b',listening:'#8b5cf6',speaking:'#ef4444',writing:'#10b981'};
+async function init(){
+  document.getElementById('examBadge').textContent=examType;
+  document.getElementById('examBadge').className='badge '+(examType==='TOEFL'?'badge-toefl':'badge-ielts');
+  document.getElementById('modBadge').textContent=module.charAt(0).toUpperCase()+module.slice(1);
+  document.getElementById('modBadge').style.background=modColors[module]+'20';
+  document.getElementById('modBadge').style.color=modColors[module];
+  try{
+    const sr=await fetch('/api/sessions/start',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({exam_type:examType,module})});
+    sessionId=(await sr.json()).session_id;
+    const qr=await fetch('/api/questions?exam_type='+examType+'&module='+module+'&limit=5');
+    questions=(await qr.json()).questions||[];
+    if(!questions.length){document.getElementById('loadState').innerHTML='<div class="text-center py-20"><i class="fas fa-exclamation-circle text-4xl text-[#94a3b8] mb-4"></i><p class="text-[#475569]">لا توجد أسئلة متاحة لهذا القسم بعد.</p><a href="/practice" class="btn btn-primary mt-4 inline-flex">رجوع</a></div>';return;}
+    document.getElementById('qTot').textContent=questions.length;
+    buildDots();
+    document.getElementById('loadState').classList.add('hidden');
+    document.getElementById('qArea').classList.remove('hidden');
+    showQ(0);startTimer();
+  }catch(e){document.getElementById('loadState').innerHTML='<p class="text-red-500 text-center py-20">خطأ في التحميل</p>';}
+}
+function buildDots(){const c=document.getElementById('dots');c.innerHTML=questions.map((_,i)=>'<div class="w-2 h-2 rounded-full bg-[#e2e8f0] dot'+i+'"></div>').join('');}
+function setDot(i,s){const d=document.querySelector('.dot'+i);if(!d)return;d.className='w-2 h-2 rounded-full '+(s==='cur'?'bg-[#3b82f6]':s==='ok'?'bg-[#10b981]':s==='bad'?'bg-[#ef4444]':s==='ans'?'bg-[#f59e0b]':'bg-[#e2e8f0]')+' dot'+i;}
+function startTimer(){totalTime=(({reading:1200,listening:600,speaking:90,writing:1800})[module]||600)*questions.length;timeLeft=totalTime;timerInt=setInterval(tick,1000);}
+function tick(){timeLeft--;const m=Math.floor(timeLeft/60),s=timeLeft%60;document.getElementById('timerTxt').textContent=m+':'+String(s).padStart(2,'0');const p=(timeLeft/totalTime)*100;document.getElementById('timerBar').style.width=p+'%';if(p<20)document.getElementById('timerBar').style.background='linear-gradient(90deg,#f59e0b,#ef4444)';if(timeLeft<=0){clearInterval(timerInt);submitExam();}}
+function showQ(i){
+  curQ=i;const q=questions[i];setDot(i,'cur');
+  document.getElementById('qNum').textContent=i+1;document.getElementById('qNumCircle').textContent=i+1;
+  document.getElementById('qTitle').textContent=q.title;
+  document.getElementById('qTypeTxt').textContent=(q.question_type||'').replace(/_/g,' ').toUpperCase();
+  document.getElementById('qContent').textContent=q.content;
+  if(q.passage){document.getElementById('passageBox').classList.remove('hidden');document.getElementById('passageTxt').textContent=q.passage;}
+  else{document.getElementById('passageBox').classList.add('hidden');}
+  document.getElementById('fbArea').classList.add('hidden');
+  ['optsArea','taArea','spkArea'].forEach(id=>document.getElementById(id).classList.add('hidden'));
+  if(module==='speaking'){document.getElementById('spkArea').classList.remove('hidden');startSpeaking(q);}
+  else if(module==='writing'){document.getElementById('taArea').classList.remove('hidden');const ta=document.getElementById('userResp');ta.value=answers[i]||'';ta.oninput=()=>{answers[i]=ta.value;const w=ta.value.trim().split(/\s+/).filter(x=>x).length;document.getElementById('wc').textContent=w+' كلمة';};}
+  else if(q.options){
+    document.getElementById('optsArea').classList.remove('hidden');
+    const opts=typeof q.options==='string'?JSON.parse(q.options):q.options;
+    const lbls=['أ','ب','ج','د','هـ'];
+    document.getElementById('optsArea').innerHTML=opts.map((o,j)=>'<button class="w-full text-right p-3 border-2 rounded-lg cursor-pointer transition-all text-sm flex items-start gap-3 '+(answers[i]===o?'border-[#3b82f6] bg-[#eff6ff]':'border-[#e2e8f0] bg-white hover:border-[#3b82f6] hover:bg-[#f0f9ff]')+'" onclick="selOpt(this,\''+o.replace(/'/g,"\\'")+'\')" data-val="'+o.replace(/"/g,'&quot;')+'"><span class="w-6 h-6 rounded-full border-2 flex-shrink-0 flex items-center justify-center text-xs font-bold border-current">'+lbls[j]+'</span><span>'+o+'</span></button>').join('');
+  }
+  document.getElementById('prevBtn').style.visibility=i>0?'visible':'hidden';
+  document.getElementById('nextBtn').classList.toggle('hidden',i>=questions.length-1);
+  document.getElementById('subBtn').classList.toggle('hidden',i<questions.length-1);
+}
+function selOpt(btn,val){document.querySelectorAll('#optsArea button').forEach(b=>{b.className='w-full text-right p-3 border-2 rounded-lg cursor-pointer transition-all text-sm flex items-start gap-3 border-[#e2e8f0] bg-white hover:border-[#3b82f6] hover:bg-[#f0f9ff]';});btn.className='w-full text-right p-3 border-2 rounded-lg cursor-pointer transition-all text-sm flex items-start gap-3 border-[#3b82f6] bg-[#eff6ff]';answers[curQ]=val;}
+async function nextQ(){await submitAns();if(curQ<questions.length-1)showQ(curQ+1);}
+function prevQ(){if(curQ>0)showQ(curQ-1);}
+async function submitAns(){
+  if(!sessionId)return;const q=questions[curQ];
+  const ans=answers[curQ]||(module==='writing'?document.getElementById('userResp')?.value:null)||(module==='speaking'?document.getElementById('spkNotes')?.value||'Speaking recorded':null);
+  if(!ans)return;
+  const res=await fetch('/api/sessions/'+sessionId+'/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question_id:q.id,answer:ans,time_spent:Math.round((Date.now()-startTime)/1000)})});
+  const d=await res.json();
+  if(d.is_correct!==null){
+    const fb=document.getElementById('fbArea');fb.classList.remove('hidden');
+    if(d.is_correct){fb.className='card mb-4 border-r-4 border-green-500 bg-green-50';fb.innerHTML='<div class="flex items-start gap-3"><i class="fas fa-check-circle text-2xl text-green-500 mt-0.5"></i><div><p class="font-bold text-green-700">إجابة صحيحة! ✅</p><p class="text-sm text-[#475569] mt-1">'+( d.explanation||'')+'</p></div></div>';}
+    else{fb.className='card mb-4 border-r-4 border-red-500 bg-red-50';fb.innerHTML='<div class="flex items-start gap-3"><i class="fas fa-times-circle text-2xl text-red-500 mt-0.5"></i><div><p class="font-bold text-red-700">إجابة خاطئة ❌</p><p class="text-sm text-[#475569] mt-1">الإجابة الصحيحة: <strong>'+d.correct_answer+'</strong></p>'+(d.explanation?'<p class="text-sm text-[#475569] mt-1">'+d.explanation+'</p>':'')+'</div></div>';}
+    document.querySelectorAll('#optsArea button').forEach(b=>{if(b.dataset.val===d.correct_answer)b.className='w-full text-right p-3 border-2 rounded-lg text-sm flex items-start gap-3 border-green-500 bg-green-50';else if(b.className.includes('eff6ff'))b.className='w-full text-right p-3 border-2 rounded-lg text-sm flex items-start gap-3 border-red-500 bg-red-50';});
+    setDot(curQ,d.is_correct?'ok':'bad');
+  }else{setDot(curQ,'ans');}
+}
+async function submitExam(){
+  clearInterval(timerInt);if(spkPrep)clearInterval(spkPrep);if(spkResp)clearInterval(spkResp);
+  await submitAns();
+  const tt=Math.round((Date.now()-startTime)/1000);
+  const res=await fetch('/api/sessions/'+sessionId+'/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({time_taken:tt})});
+  const d=await res.json();
+  document.getElementById('qArea').classList.add('hidden');document.getElementById('resArea').classList.remove('hidden');
+  const pct=d.max_score>0?Math.round((d.score/d.max_score)*100):null;
+  document.getElementById('rScore').textContent=d.max_score>0?d.score.toFixed(1)+'/'+d.max_score.toFixed(1):'مُسلَّم';
+  document.getElementById('rPct').textContent=pct!==null?pct+'%':'—';
+  document.getElementById('rTime').textContent=Math.floor(tt/60)+'د '+tt%60+'ث';
+  document.getElementById('rReview').innerHTML='<h3 class="font-bold text-[#1a2b4a] mb-3">تحليل الأداء</h3><p class="'+(pct>=70?'text-green-600':pct>=50?'text-yellow-600':'text-red-600')+' font-semibold">'+(pct>=70?'ممتاز! أنت على المسار الصحيح 🎯':pct>=50?'جيد! استمر في التدريب 💪':'تحتاج مراجعة أكثر. لا تيأس! 📚')+'</p><div class="grid grid-cols-2 gap-3 mt-3 text-sm"><div class="p-3 bg-[#f8fafc] rounded-lg"><span class="text-[#94a3b8]">الاختبار:</span> <span class="font-semibold">'+examType+'</span></div><div class="p-3 bg-[#f8fafc] rounded-lg"><span class="text-[#94a3b8]">القسم:</span> <span class="font-semibold capitalize">'+module+'</span></div></div>';
+}
+function startSpeaking(q){const pp=q.content.includes('15')?15:q.content.includes('30')?30:60;let pl=pp;document.getElementById('prepDiv').classList.remove('hidden');document.getElementById('recDiv').classList.add('hidden');document.getElementById('prepTxt').textContent='0:'+String(pl).padStart(2,'0');spkPrep=setInterval(()=>{pl--;document.getElementById('prepTxt').textContent='0:'+String(pl).padStart(2,'0');if(pl<=0){clearInterval(spkPrep);document.getElementById('prepDiv').classList.add('hidden');document.getElementById('recDiv').classList.remove('hidden');startRespTimer(q.time_limit||60);}},1000);}
+function startRespTimer(t){let l=t;document.getElementById('respLeft').textContent=Math.floor(l/60)+':'+String(l%60).padStart(2,'0');spkResp=setInterval(()=>{l--;document.getElementById('respLeft').textContent=Math.floor(l/60)+':'+String(l%60).padStart(2,'0');if(l<=0){clearInterval(spkResp);document.getElementById('recStatus').textContent='انتهى الوقت!';}},1000);}
+function toggleRec(){isRec=!isRec;document.getElementById('micIco').className='fas '+(isRec?'fa-stop':'fa-microphone')+' text-[#ef4444] text-3xl'+(isRec?'':' pulse');document.getElementById('recStatus').textContent=isRec?'جارٍ التسجيل... اضغط للإيقاف':'تم الإيقاف. اضغط للتسجيل مجدداً';if(!isRec)answers[curQ]=document.getElementById('spkNotes').value||'تم التسجيل';}
+function confirmExit(){if(confirm('هل تريد الخروج من الاختبار؟ ستضيع إجاباتك.'))window.location.href='/practice';}
+init();
+</script>`))
 })
 
-// Admin Panel
+// ADMIN PANEL
 app.get('/admin', async (c) => {
   const user = await getUser(c)
   if (!user) return c.redirect('/login')
   if (user.role !== 'admin') return c.redirect('/dashboard')
-
-  return c.html(getLayout('Admin Panel', `
-    <nav class="navbar">
-      <a href="/admin" class="navbar-brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen<span class="accent"> Guide</span> <span class="text-xs text-[#94a3b8] ml-2 font-normal">Admin</span></a>
-      <div class="flex items-center gap-4">
-        <span class="text-[#94a3b8] text-sm hidden sm:block"><i class="fas fa-shield-alt mr-1 text-[#f59e0b]"></i>${user.name}</span>
-        <button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn-secondary text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i> Logout</button>
-      </div>
+  return c.html(L('لوحة الإدارة', `
+<nav class="navbar">
+  <a href="/admin" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span> <span class="text-xs text-[#94a3b8] mr-2 font-normal">إدارة</span></a>
+  <div class="flex items-center gap-3">
+    <span class="text-[#94a3b8] text-sm hidden sm:block"><i class="fas fa-shield-alt mr-1 text-[#f59e0b]"></i>${user.name}</span>
+    <button onclick="fetch('/api/auth/logout',{method:'POST'}).then(()=>location.href='/login')" class="btn btn-outline text-sm py-2 px-3"><i class="fas fa-sign-out-alt"></i> خروج</button>
+  </div>
+</nav>
+<div class="flex">
+  <aside class="sidebar" id="sidebar">
+    <nav class="py-4">
+      <a href="#" onclick="showTab('overview')" id="n-overview" class="active"><i class="fas fa-tachometer-alt w-5"></i> نظرة عامة</a>
+      <a href="#" onclick="showTab('codes')" id="n-codes"><i class="fas fa-key w-5"></i> أكواد التفعيل</a>
+      <a href="#" onclick="showTab('enrollments')" id="n-enrollments"><i class="fas fa-user-check w-5"></i> الطلاب المسجّلون</a>
+      <a href="#" onclick="showTab('users')" id="n-users"><i class="fas fa-users w-5"></i> جميع الطلاب</a>
+      <a href="#" onclick="showTab('hours')" id="n-hours"><i class="fas fa-clock w-5"></i> ساعات VIP</a>
+      <a href="#" onclick="showTab('questions')" id="n-questions"><i class="fas fa-question-circle w-5"></i> الأسئلة</a>
+      <a href="#" onclick="showTab('payments')" id="n-payments"><i class="fas fa-money-bill-wave w-5"></i> طلبات الدفع</a>
+      <a href="#" onclick="showTab('admins')" id="n-admins"><i class="fas fa-user-shield w-5"></i> إدارة الأدمن</a>
+      <a href="#" onclick="showTab('setup')" id="n-setup"><i class="fas fa-cogs w-5"></i> الإعداد</a>
     </nav>
-    <div class="flex">
-      <aside class="sidebar">
-        <nav class="py-4">
-          <a href="#" onclick="showTab('overview')" id="nav-overview" class="active"><i class="fas fa-tachometer-alt w-5"></i> Overview</a>
-          <a href="#" onclick="showTab('questions')" id="nav-questions"><i class="fas fa-question-circle w-5"></i> Questions</a>
-          <a href="#" onclick="showTab('users')" id="nav-users"><i class="fas fa-users w-5"></i> Students</a>
-          <a href="#" onclick="showTab('add-question')" id="nav-add-question"><i class="fas fa-plus-circle w-5"></i> Add Question</a>
-        </nav>
-      </aside>
-      <main class="flex-1 p-6 overflow-y-auto">
-        <!-- Overview Tab -->
-        <div id="tab-overview">
-          <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">Platform Overview</h1>
-          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <div class="stat-card"><div class="text-2xl font-bold text-[#1a2b4a]" id="aStudents">-</div><div class="text-sm text-[#475569] mt-1">Total Students</div></div>
-            <div class="stat-card" style="border-color:#f59e0b"><div class="text-2xl font-bold text-[#1a2b4a]" id="aSessions">-</div><div class="text-sm text-[#475569] mt-1">Total Sessions</div></div>
-            <div class="stat-card" style="border-color:#10b981"><div class="text-2xl font-bold text-[#1a2b4a]" id="aQuestions">-</div><div class="text-sm text-[#475569] mt-1">Active Questions</div></div>
-            <div class="stat-card" style="border-color:#8b5cf6"><div class="text-2xl font-bold text-[#1a2b4a]">2</div><div class="text-sm text-[#475569] mt-1">Exam Types</div></div>
-          </div>
+  </aside>
+  <main class="flex-1 p-4 md:p-6 overflow-y-auto">
 
-          <div class="card mb-4">
-            <h3 class="font-bold text-[#1a2b4a] mb-4"><i class="fas fa-chart-pie mr-2 text-[#3b82f6]"></i>Session Distribution</h3>
-            <div id="examBreakdown" class="grid grid-cols-2 md:grid-cols-4 gap-3"></div>
-          </div>
-
-          <div class="card bg-[#f0fdf4] border-green-200">
-            <h3 class="font-bold text-green-800 mb-3"><i class="fas fa-cogs mr-2"></i>Quick Setup</h3>
-            <div class="flex flex-wrap gap-3">
-              <button onclick="setupDB()" class="btn-primary text-sm"><i class="fas fa-database mr-1"></i>Initialize Database</button>
-              <button onclick="seedData()" class="btn-secondary text-sm"><i class="fas fa-seedling mr-1"></i>Seed Sample Questions</button>
-            </div>
-            <p class="text-xs text-green-700 mt-2">Use these buttons to set up the database for first-time use.</p>
-            <div id="setupMsg" class="mt-2 text-sm hidden"></div>
-          </div>
-        </div>
-
-        <!-- Questions Tab -->
-        <div id="tab-questions" class="hidden">
-          <div class="flex items-center justify-between mb-6">
-            <h1 class="text-2xl font-bold text-[#1a2b4a]">Manage Questions</h1>
-            <button onclick="showTab('add-question')" class="btn-primary text-sm"><i class="fas fa-plus"></i> Add Question</button>
-          </div>
-          <div class="card">
-            <div class="flex gap-3 mb-4">
-              <select id="filterExam" onchange="loadQuestions()" class="border border-[#e2e8f0] rounded-lg px-3 py-2 text-sm">
-                <option value="">All Exams</option>
-                <option value="TOEFL">TOEFL</option>
-                <option value="IELTS">IELTS</option>
-              </select>
-              <select id="filterModule" onchange="loadQuestions()" class="border border-[#e2e8f0] rounded-lg px-3 py-2 text-sm">
-                <option value="">All Modules</option>
-                <option value="reading">Reading</option>
-                <option value="listening">Listening</option>
-                <option value="speaking">Speaking</option>
-                <option value="writing">Writing</option>
-              </select>
-            </div>
-            <div id="questionsList" class="overflow-x-auto">
-              <p class="text-[#94a3b8] text-center py-8">Loading questions...</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Users Tab -->
-        <div id="tab-users" class="hidden">
-          <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">Student Management</h1>
-          <div class="card">
-            <div id="usersList">
-              <p class="text-[#94a3b8] text-center py-8">Loading students...</p>
-            </div>
-          </div>
-        </div>
-
-        <!-- Add Question Tab -->
-        <div id="tab-add-question" class="hidden">
-          <div class="flex items-center gap-3 mb-6">
-            <button onclick="showTab('questions')" class="text-[#94a3b8] hover:text-[#1a2b4a]"><i class="fas fa-chevron-left"></i></button>
-            <h1 class="text-2xl font-bold text-[#1a2b4a]">Add New Question</h1>
-          </div>
-          <div class="card max-w-3xl">
-            <div class="grid md:grid-cols-2 gap-4 mb-4">
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Exam Type *</label>
-                <select id="aqExam" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]">
-                  <option value="TOEFL">TOEFL iBT</option>
-                  <option value="IELTS">IELTS Academic</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Module *</label>
-                <select id="aqModule" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]">
-                  <option value="reading">Reading</option>
-                  <option value="listening">Listening</option>
-                  <option value="speaking">Speaking</option>
-                  <option value="writing">Writing</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Question Type *</label>
-                <select id="aqType" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]">
-                  <option value="multiple_choice">Multiple Choice</option>
-                  <option value="true_false">True/False/Not Given</option>
-                  <option value="fill_blank">Fill in the Blank</option>
-                  <option value="independent">Independent Task</option>
-                  <option value="integrated">Integrated Task</option>
-                </select>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Difficulty *</label>
-                <select id="aqDiff" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]">
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
-                </select>
-              </div>
-            </div>
-            <div class="mb-4">
-              <label class="block text-sm font-semibold text-[#475569] mb-1">Question Title *</label>
-              <input id="aqTitle" type="text" placeholder="Brief title for the question" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]"/>
-            </div>
-            <div class="mb-4">
-              <label class="block text-sm font-semibold text-[#475569] mb-1">Question Content / Prompt *</label>
-              <textarea id="aqContent" rows="4" placeholder="The full question text or prompt" class="answer-area"></textarea>
-            </div>
-            <div class="mb-4">
-              <label class="block text-sm font-semibold text-[#475569] mb-1">Reading Passage (optional)</label>
-              <textarea id="aqPassage" rows="5" placeholder="Paste the reading or listening transcript here (optional)" class="answer-area"></textarea>
-            </div>
-            <div class="mb-4">
-              <label class="block text-sm font-semibold text-[#475569] mb-1">Answer Options (one per line, for multiple choice)</label>
-              <textarea id="aqOptions" rows="4" placeholder="Option A&#10;Option B&#10;Option C&#10;Option D" class="answer-area" style="min-height:100px"></textarea>
-            </div>
-            <div class="grid md:grid-cols-2 gap-4 mb-4">
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Correct Answer</label>
-                <input id="aqAnswer" type="text" placeholder="Exact text of correct option" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]"/>
-              </div>
-              <div>
-                <label class="block text-sm font-semibold text-[#475569] mb-1">Points</label>
-                <input id="aqPoints" type="number" value="1" min="0.5" step="0.5" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]"/>
-              </div>
-            </div>
-            <div class="mb-4">
-              <label class="block text-sm font-semibold text-[#475569] mb-1">Explanation</label>
-              <textarea id="aqExplanation" rows="2" placeholder="Brief explanation of the correct answer" class="answer-area" style="min-height:80px"></textarea>
-            </div>
-            <div class="mb-4">
-              <label class="block text-sm font-semibold text-[#475569] mb-1">Time Limit (seconds)</label>
-              <input id="aqTime" type="number" value="600" min="30" class="w-full border-2 border-[#e2e8f0] rounded-lg px-3 py-2.5 focus:outline-none focus:border-[#3b82f6]"/>
-            </div>
-            <div id="aqError" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg mb-4"></div>
-            <div id="aqSuccess" class="hidden text-green-600 text-sm bg-green-50 p-3 rounded-lg mb-4"></div>
-            <div class="flex gap-3">
-              <button onclick="addQuestion()" class="btn-primary"><i class="fas fa-save mr-1"></i>Save Question</button>
-              <button onclick="resetForm()" class="btn-secondary"><i class="fas fa-redo mr-1"></i>Reset</button>
-            </div>
-          </div>
-        </div>
-      </main>
+    <!-- Overview -->
+    <div id="t-overview">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">نظرة عامة على المنصة</h1>
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+        <div class="card border-r-4 border-[#3b82f6]"><div class="text-2xl font-bold" id="aStudents">-</div><div class="text-sm text-[#475569] mt-1">الطلاب</div></div>
+        <div class="card border-r-4 border-[#10b981]"><div class="text-2xl font-bold" id="aEnroll">-</div><div class="text-sm text-[#475569] mt-1">تسجيلات نشطة</div></div>
+        <div class="card border-r-4 border-[#f59e0b]"><div class="text-2xl font-bold" id="aCodes">-</div><div class="text-sm text-[#475569] mt-1">أكواد متاحة</div></div>
+        <div class="card border-r-4 border-[#8b5cf6]"><div class="text-2xl font-bold" id="aPayReq">-</div><div class="text-sm text-[#475569] mt-1">طلبات دفع</div></div>
+      </div>
+      <div class="card">
+        <h3 class="font-bold text-[#1a2b4a] mb-4">التسجيلات حسب المسار</h3>
+        <div id="aBreakdown"></div>
+      </div>
     </div>
-  `, `<script>
-    function showTab(tab) {
-      ['overview','questions','users','add-question'].forEach(t => {
-        document.getElementById('tab-' + t)?.classList.add('hidden');
-        document.getElementById('nav-' + t)?.classList.remove('active');
-      });
-      document.getElementById('tab-' + tab)?.classList.remove('hidden');
-      document.getElementById('nav-' + tab)?.classList.add('active');
-      if (tab === 'questions') loadQuestions();
-      if (tab === 'users') loadUsers();
-      if (tab === 'overview') loadAdminStats();
-    }
 
-    async function loadAdminStats() {
-      const r = await fetch('/api/admin/stats');
-      const d = await r.json();
-      document.getElementById('aStudents').textContent = d.total_users || 0;
-      document.getElementById('aSessions').textContent = d.total_sessions || 0;
-      document.getElementById('aQuestions').textContent = d.total_questions || 0;
-      
-      if (d.exam_breakdown && d.exam_breakdown.length > 0) {
-        const colors = { reading: '#f59e0b', listening: '#8b5cf6', speaking: '#ef4444', writing: '#10b981' };
-        document.getElementById('examBreakdown').innerHTML = d.exam_breakdown.map(e => 
-          '<div class="p-3 bg-[#f8fafc] rounded-lg text-center">' +
-          '<div class="text-lg font-bold text-[#1a2b4a]">' + e.count + '</div>' +
-          '<div class="text-xs font-semibold" style="color:' + (colors[e.module] || '#3b82f6') + '">' + e.exam_type + ' ' + e.module.toUpperCase() + '</div>' +
-          '</div>'
-        ).join('');
-      }
-    }
+    <!-- Codes -->
+    <div id="t-codes" class="hidden">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-2xl font-bold text-[#1a2b4a]">أكواد التفعيل</h1>
+      </div>
+      <div class="card mb-4">
+        <h3 class="font-bold text-[#1a2b4a] mb-4">توليد كود جديد</h3>
+        <div class="grid md:grid-cols-3 gap-4">
+          <div>
+            <label class="block text-sm font-semibold text-[#475569] mb-1">المسار</label>
+            <select id="genCourse" class="input">
+              ${COURSES.map(c => `<option value="${c.code}">${c.name_ar} – ${c.price} د.أ</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-semibold text-[#475569] mb-1">ملاحظات (اختياري)</label>
+            <input id="genNotes" type="text" class="input" placeholder="اسم الطالب أو رقم الفاتورة"/>
+          </div>
+          <div class="flex items-end">
+            <button onclick="genCode()" class="btn btn-primary w-full"><i class="fas fa-plus"></i> توليد الكود</button>
+          </div>
+        </div>
+        <div id="genResult" class="hidden mt-4 p-4 bg-[#f0fdf4] border border-[#86efac] rounded-xl">
+          <p class="text-sm text-[#166534] mb-2">✅ تم توليد الكود بنجاح:</p>
+          <div class="flex items-center gap-3">
+            <div class="font-mono font-bold text-2xl text-[#1a2b4a] bg-white border-2 border-[#10b981] rounded-lg px-4 py-2 tracking-widest" id="genCodeTxt"></div>
+            <button onclick="copyCode()" class="btn btn-success text-sm"><i class="fas fa-copy"></i> نسخ</button>
+            <button onclick="sendCodeWA()" class="btn btn-wa text-sm"><i class="fab fa-whatsapp"></i> إرسال واتساب</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        <h3 class="font-bold text-[#1a2b4a] mb-4">سجل الأكواد</h3>
+        <div id="codesList" class="overflow-x-auto"></div>
+      </div>
+    </div>
 
-    async function loadQuestions() {
-      const exam = document.getElementById('filterExam')?.value || '';
-      const mod = document.getElementById('filterModule')?.value || '';
-      let url = '/api/admin/questions';
-      const res = await fetch(url);
-      const data = await res.json();
-      const qs = data.questions || [];
-      
-      const filtered = qs.filter(q => (!exam || q.exam_type === exam) && (!mod || q.module === mod));
-      
-      if (filtered.length === 0) {
-        document.getElementById('questionsList').innerHTML = '<p class="text-center py-8 text-[#94a3b8]">No questions found</p>';
-        return;
-      }
-      
-      document.getElementById('questionsList').innerHTML = 
-        '<table class="w-full text-sm">' +
-        '<thead><tr class="border-b border-[#f1f5f9]">' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Title</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Exam</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Module</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Type</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Difficulty</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Status</th>' +
-        '<th class="py-3 px-2"></th></tr></thead><tbody>' +
-        filtered.map(q => 
-          '<tr class="border-b border-[#f1f5f9] hover:bg-[#f8fafc]">' +
-          '<td class="py-3 px-2 font-medium">' + q.title.substring(0,40) + (q.title.length > 40 ? '...' : '') + '</td>' +
-          '<td class="py-3 px-2"><span class="' + (q.exam_type === 'TOEFL' ? 'badge-toefl' : 'badge-ielts') + '">' + q.exam_type + '</span></td>' +
-          '<td class="py-3 px-2 capitalize">' + q.module + '</td>' +
-          '<td class="py-3 px-2 capitalize text-xs text-[#94a3b8]">' + (q.question_type || '').replace(/_/g,' ') + '</td>' +
-          '<td class="py-3 px-2 capitalize">' + (q.difficulty || '') + '</td>' +
-          '<td class="py-3 px-2"><span class="' + (q.is_active ? 'text-green-600' : 'text-red-500') + ' text-xs font-semibold">' + (q.is_active ? 'Active' : 'Inactive') + '</span></td>' +
-          '<td class="py-3 px-2"><button onclick="deleteQ(' + q.id + ')" class="text-red-400 hover:text-red-600 text-xs"><i class="fas fa-trash"></i></button></td>' +
-          '</tr>'
-        ).join('') + '</tbody></table>';
-    }
+    <!-- Enrollments -->
+    <div id="t-enrollments" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">الطلاب المسجّلون في المسارات</h1>
+      <div class="card overflow-x-auto"><div id="enrollList"></div></div>
+    </div>
 
-    async function deleteQ(id) {
-      if (!confirm('Deactivate this question?')) return;
-      await fetch('/api/admin/questions/' + id, {method:'DELETE'});
-      loadQuestions();
-    }
+    <!-- Users -->
+    <div id="t-users" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">جميع الطلاب</h1>
+      <div class="card overflow-x-auto"><div id="usersList"></div></div>
+    </div>
 
-    async function loadUsers() {
-      const res = await fetch('/api/admin/users');
-      const data = await res.json();
-      const users = data.users || [];
-      
-      if (users.length === 0) {
-        document.getElementById('usersList').innerHTML = '<p class="text-center py-8 text-[#94a3b8]">No students found</p>';
-        return;
-      }
-      
-      document.getElementById('usersList').innerHTML =
-        '<table class="w-full text-sm">' +
-        '<thead><tr class="border-b border-[#f1f5f9]">' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Name</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Email</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Role</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Sessions</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Joined</th>' +
-        '<th class="text-left py-3 px-2 font-semibold text-[#475569]">Last Active</th></tr></thead><tbody>' +
-        users.map(u =>
-          '<tr class="border-b border-[#f1f5f9] hover:bg-[#f8fafc]">' +
-          '<td class="py-3 px-2 font-medium">' + u.name + '</td>' +
-          '<td class="py-3 px-2 text-[#475569]">' + u.email + '</td>' +
-          '<td class="py-3 px-2"><span class="' + (u.role === 'admin' ? 'badge-toefl' : 'badge-ielts') + '">' + u.role + '</span></td>' +
-          '<td class="py-3 px-2">' + (u.total_sessions || 0) + '</td>' +
-          '<td class="py-3 px-2 text-xs text-[#94a3b8]">' + (u.created_at ? new Date(u.created_at).toLocaleDateString() : '-') + '</td>' +
-          '<td class="py-3 px-2 text-xs text-[#94a3b8]">' + (u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never') + '</td>' +
-          '</tr>'
-        ).join('') + '</tbody></table>';
-    }
+    <!-- VIP Hours -->
+    <div id="t-hours" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">إدارة ساعات VIP</h1>
+      <div class="card mb-4">
+        <h3 class="font-bold text-[#1a2b4a] mb-4">تسجيل حصة جديدة</h3>
+        <div class="grid md:grid-cols-3 gap-4">
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">ID الطالب</label>
+            <input id="hUserId" type="number" class="input" placeholder="رقم ID الطالب"/></div>
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">عدد الساعات</label>
+            <input id="hHours" type="number" step="0.5" value="1" min="0.5" class="input"/></div>
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">ملاحظات</label>
+            <input id="hNotes" type="text" class="input" placeholder="مثال: حصة تحدث"/></div>
+        </div>
+        <div id="hMsg" class="hidden mt-3 text-sm p-3 rounded-lg"></div>
+        <button onclick="logHours()" class="btn btn-primary mt-4"><i class="fas fa-minus-circle"></i> خصم الساعات</button>
+      </div>
+      <div class="card"><h3 class="font-bold text-[#1a2b4a] mb-4">طلاب VIP</h3><div id="vipList"></div></div>
+    </div>
 
-    async function addQuestion() {
-      const errEl = document.getElementById('aqError');
-      const sucEl = document.getElementById('aqSuccess');
-      errEl.classList.add('hidden'); sucEl.classList.add('hidden');
-      
-      const optText = document.getElementById('aqOptions').value.trim();
-      const options = optText ? optText.split('\\n').map(o => o.trim()).filter(o => o) : null;
-      
-      const body = {
-        exam_type: document.getElementById('aqExam').value,
-        module: document.getElementById('aqModule').value,
-        question_type: document.getElementById('aqType').value,
-        difficulty: document.getElementById('aqDiff').value,
-        title: document.getElementById('aqTitle').value,
-        content: document.getElementById('aqContent').value,
-        passage: document.getElementById('aqPassage').value || null,
-        options: options,
-        correct_answer: document.getElementById('aqAnswer').value || null,
-        explanation: document.getElementById('aqExplanation').value || null,
-        time_limit: parseInt(document.getElementById('aqTime').value),
-        points: parseFloat(document.getElementById('aqPoints').value)
-      };
-      
-      if (!body.title || !body.content) {
-        errEl.textContent = 'Title and content are required.'; errEl.classList.remove('hidden'); return;
-      }
-      
-      const res = await fetch('/api/admin/questions', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (data.success) { sucEl.textContent = 'Question added successfully! ID: ' + data.id; sucEl.classList.remove('hidden'); resetForm(); }
-      else { errEl.textContent = data.error || 'Failed to add question'; errEl.classList.remove('hidden'); }
-    }
+    <!-- Questions -->
+    <div id="t-questions" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">الأسئلة التدريبية</h1>
+      <div class="card mb-4">
+        <h3 class="font-bold text-[#1a2b4a] mb-4">إضافة سؤال جديد</h3>
+        <div class="grid md:grid-cols-2 gap-4 mb-4">
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">الاختبار</label>
+            <select id="aqExam" class="input"><option value="TOEFL">TOEFL iBT</option><option value="IELTS">IELTS</option></select></div>
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">القسم</label>
+            <select id="aqMod" class="input"><option value="reading">Reading</option><option value="listening">Listening</option><option value="speaking">Speaking</option><option value="writing">Writing</option></select></div>
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">نوع السؤال</label>
+            <select id="aqType" class="input"><option value="multiple_choice">اختيار من متعدد</option><option value="true_false">صح/خطأ</option><option value="independent">مقال حر</option><option value="integrated">مدمج</option></select></div>
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">الصعوبة</label>
+            <select id="aqDiff" class="input"><option value="easy">سهل</option><option value="medium">متوسط</option><option value="hard">صعب</option></select></div>
+        </div>
+        <div class="mb-3"><label class="block text-sm font-semibold text-[#475569] mb-1">عنوان السؤال *</label><input id="aqTitle" type="text" class="input" placeholder="عنوان مختصر"/></div>
+        <div class="mb-3"><label class="block text-sm font-semibold text-[#475569] mb-1">نص السؤال / التعليمات *</label><textarea id="aqContent" rows="3" class="input resize-y" placeholder="نص السؤال كاملاً..."></textarea></div>
+        <div class="mb-3"><label class="block text-sm font-semibold text-[#475569] mb-1">النص المقروء / التفريغ الصوتي (اختياري)</label><textarea id="aqPassage" rows="4" class="input resize-y" placeholder="النص أو التفريغ..."></textarea></div>
+        <div class="mb-3"><label class="block text-sm font-semibold text-[#475569] mb-1">خيارات الإجابة (سطر لكل خيار – للاختيار المتعدد)</label><textarea id="aqOpts" rows="4" class="input resize-y" placeholder="الخيار الأول&#10;الخيار الثاني&#10;الخيار الثالث&#10;الخيار الرابع"></textarea></div>
+        <div class="grid md:grid-cols-2 gap-4 mb-3">
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">الإجابة الصحيحة</label><input id="aqAns" type="text" class="input" placeholder="نص الإجابة الصحيحة"/></div>
+          <div><label class="block text-sm font-semibold text-[#475569] mb-1">الدرجات</label><input id="aqPts" type="number" value="1" class="input"/></div>
+        </div>
+        <div class="mb-3"><label class="block text-sm font-semibold text-[#475569] mb-1">الشرح</label><textarea id="aqExp" rows="2" class="input resize-y" placeholder="شرح الإجابة الصحيحة..."></textarea></div>
+        <div id="aqErr" class="hidden text-red-600 text-sm bg-red-50 p-3 rounded-lg mb-3"></div>
+        <div id="aqSuc" class="hidden text-green-600 text-sm bg-green-50 p-3 rounded-lg mb-3"></div>
+        <div class="flex gap-3"><button onclick="addQ()" class="btn btn-primary"><i class="fas fa-save"></i> حفظ السؤال</button><button onclick="resetQ()" class="btn btn-outline"><i class="fas fa-redo"></i> مسح</button></div>
+      </div>
+      <div class="card"><h3 class="font-bold text-[#1a2b4a] mb-4">الأسئلة المتاحة</h3><div id="qList" class="overflow-x-auto"></div></div>
+    </div>
 
-    function resetForm() {
-      ['aqTitle','aqContent','aqPassage','aqOptions','aqAnswer','aqExplanation'].forEach(id => document.getElementById(id).value = '');
-      document.getElementById('aqPoints').value = '1';
-      document.getElementById('aqTime').value = '600';
-    }
+    <!-- Payments -->
+    <div id="t-payments" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">طلبات الدفع</h1>
+      <div class="card overflow-x-auto"><div id="payList"></div></div>
+    </div>
 
-    async function setupDB() {
-      const btn = event.target; btn.disabled = true; btn.textContent = 'Setting up...';
-      const msg = document.getElementById('setupMsg');
-      try {
-        const r = await fetch('/api/setup'); const d = await r.json();
-        msg.textContent = d.success ? 'Database initialized!' : 'Error: ' + d.error;
-        msg.className = 'mt-2 text-sm ' + (d.success ? 'text-green-700' : 'text-red-600');
-        msg.classList.remove('hidden');
-        loadAdminStats();
-      } finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-database mr-1"></i>Initialize Database'; }
-    }
+    <!-- Admins Management -->
+    <div id="t-admins" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">إدارة حسابات الأدمن</h1>
+      <div class="grid md:grid-cols-2 gap-6">
+        <div class="card">
+          <h3 class="font-bold text-[#1a2b4a] mb-4"><i class="fas fa-user-plus text-[#3b82f6] mr-2"></i>إنشاء أدمن جديد</h3>
+          <div class="space-y-3">
+            <div><label class="block text-sm font-semibold text-[#475569] mb-1">الاسم الكامل</label>
+              <input id="adName" type="text" class="input" placeholder="اسم المسؤول"/></div>
+            <div><label class="block text-sm font-semibold text-[#475569] mb-1">البريد الإلكتروني</label>
+              <input id="adEmail" type="email" class="input" placeholder="admin@domain.com"/></div>
+            <div><label class="block text-sm font-semibold text-[#475569] mb-1">كلمة المرور (8 أحرف على الأقل)</label>
+              <input id="adPass" type="password" class="input" placeholder="••••••••"/></div>
+            <div id="adMsg" class="hidden text-sm p-3 rounded-lg"></div>
+            <button onclick="createAdmin()" class="btn btn-primary w-full justify-center"><i class="fas fa-user-shield"></i> إنشاء الحساب</button>
+          </div>
+        </div>
+        <div class="card">
+          <h3 class="font-bold text-[#1a2b4a] mb-4"><i class="fas fa-key text-[#f59e0b] mr-2"></i>تغيير كلمة مرور طالب</h3>
+          <div class="space-y-3">
+            <div><label class="block text-sm font-semibold text-[#475569] mb-1">ID الطالب</label>
+              <input id="cpUserId" type="number" class="input" placeholder="رقم ID الطالب من جدول الطلاب"/></div>
+            <div><label class="block text-sm font-semibold text-[#475569] mb-1">كلمة المرور الجديدة</label>
+              <input id="cpPass" type="password" class="input" placeholder="كلمة المرور الجديدة"/></div>
+            <div id="cpMsg" class="hidden text-sm p-3 rounded-lg"></div>
+            <button onclick="changePass()" class="btn btn-gold w-full justify-center"><i class="fas fa-key"></i> تغيير كلمة المرور</button>
+          </div>
+          <div class="mt-4 p-3 bg-[#fef3c7] border border-[#fde68a] rounded-lg text-xs text-[#92400e]">
+            <i class="fas fa-exclamation-triangle mr-1"></i>
+            احرص على إبلاغ الطالب بكلمة المرور الجديدة عبر الواتساب
+          </div>
+        </div>
+      </div>
+    </div>
 
-    async function seedData() {
-      const btn = event.target; btn.disabled = true; btn.textContent = 'Seeding...';
-      const msg = document.getElementById('setupMsg');
-      try {
-        const r = await fetch('/api/setup/seed'); const d = await r.json();
-        msg.textContent = d.success ? d.message : 'Error: ' + d.error;
-        msg.className = 'mt-2 text-sm ' + (d.success ? 'text-green-700' : 'text-red-600');
-        msg.classList.remove('hidden');
-        loadAdminStats();
-      } finally { btn.disabled = false; btn.innerHTML = '<i class="fas fa-seedling mr-1"></i>Seed Sample Questions'; }
-    }
+    <!-- Setup -->
+    <div id="t-setup" class="hidden">
+      <h1 class="text-2xl font-bold text-[#1a2b4a] mb-6">إعداد قاعدة البيانات</h1>
+      <div class="card bg-[#f0fdf4] border-green-200">
+        <h3 class="font-bold text-green-800 mb-3"><i class="fas fa-database mr-2"></i>أدوات الإعداد</h3>
+        <div class="flex flex-wrap gap-3">
+          <button onclick="setupDB()" class="btn btn-primary"><i class="fas fa-database mr-1"></i> تهيئة قاعدة البيانات</button>
+        </div>
+        <div id="setupMsg" class="mt-3 text-sm hidden"></div>
+        <div class="mt-4 p-3 bg-white rounded-lg text-sm text-[#475569]">
+          <p class="font-semibold mb-1">بيانات الدخول الافتراضية:</p>
+          <p>أدمن: admin@prepmaster.edu / Admin@123</p>
+        </div>
+      </div>
+    </div>
 
-    loadAdminStats();
-  </script>`))
+  </main>
+</div>`, `<script>
+function showTab(t){
+  ['overview','codes','enrollments','users','hours','questions','payments','admins','setup'].forEach(x=>{
+    document.getElementById('t-'+x)?.classList.add('hidden');
+    document.getElementById('n-'+x)?.classList.remove('active');
+  });
+  document.getElementById('t-'+t)?.classList.remove('hidden');
+  document.getElementById('n-'+t)?.classList.add('active');
+  const loaders={codes:loadCodes,enrollments:loadEnrollments,users:loadUsers,hours:loadVIP,questions:loadQs,overview:loadStats,payments:loadPayments};
+  if(loaders[t])loaders[t]();
+}
+
+async function loadStats(){
+  const d=await(await fetch('/api/admin/stats')).json();
+  document.getElementById('aStudents').textContent=d.students||0;
+  document.getElementById('aEnroll').textContent=d.enrollments||0;
+  document.getElementById('aCodes').textContent=d.unused_codes||0;
+  document.getElementById('aPayReq').textContent=d.payment_requests||0;
+  document.getElementById('aBreakdown').innerHTML=(d.breakdown||[]).map(b=>'<div class="flex items-center justify-between py-2 border-b border-[#f1f5f9]"><span class="text-sm font-medium">'+b.name_ar+'</span><span class="font-bold text-[#3b82f6]">'+b.cnt+' طالب</span></div>').join('')||'<p class="text-[#94a3b8] text-center py-4">لا توجد تسجيلات بعد</p>';
+}
+
+let lastGenCode='',lastGenCourse='';
+async function genCode(){
+  const course=document.getElementById('genCourse').value,notes=document.getElementById('genNotes').value;
+  const d=await(await fetch('/api/admin/generate-code',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({course_code:course,notes})})).json();
+  if(d.success){
+    lastGenCode=d.code;lastGenCourse=document.getElementById('genCourse').options[document.getElementById('genCourse').selectedIndex].text;
+    document.getElementById('genCodeTxt').textContent=d.code;
+    document.getElementById('genResult').classList.remove('hidden');
+    loadCodes();
+  }else{alert(d.error);}
+}
+function copyCode(){navigator.clipboard.writeText(lastGenCode);alert('تم نسخ الكود: '+lastGenCode);}
+function sendCodeWA(){
+  const msg=encodeURIComponent('🎓 كود التفعيل الخاص بك لـ The Yamen Guide\n\n📚 المسار: '+lastGenCourse+'\n🔑 الكود: '+lastGenCode+'\n\nخطوات التفعيل:\n1️⃣ افتح الموقع: the-yamen-guide.pages.dev\n2️⃣ سجّل الدخول أو أنشئ حساباً جديداً\n3️⃣ اضغط "تفعيل مسار" وأدخل الكود\n\nبالتوفيق! 🌟');
+  window.open('https://wa.me/?text='+msg,'_blank');
+}
+
+async function loadCodes(){
+  const d=await(await fetch('/api/admin/codes')).json();
+  const codes=d.codes||[];
+  if(!codes.length){document.getElementById('codesList').innerHTML='<p class="text-[#94a3b8] text-center py-8">لا توجد أكواد بعد</p>';return;}
+  document.getElementById('codesList').innerHTML='<table class="w-full text-sm"><thead><tr class="border-b"><th class="text-right py-2 px-2 font-semibold text-[#475569]">الكود</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">المسار</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">الحالة</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">استُخدم بواسطة</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">التاريخ</th></tr></thead><tbody>'+
+  codes.map(c=>'<tr class="border-b hover:bg-[#f8fafc]"><td class="py-2 px-2 font-mono font-bold text-[#1a2b4a]">'+c.code+'</td><td class="py-2 px-2 text-xs">'+c.name_ar+'</td><td class="py-2 px-2"><span class="badge '+(c.is_used?'bg-red-100 text-red-700':'bg-green-100 text-green-700')+'">'+(c.is_used?'مُستخدم':'متاح')+'</span></td><td class="py-2 px-2 text-xs text-[#475569]">'+(c.used_by_name||'—')+'</td><td class="py-2 px-2 text-xs text-[#94a3b8]">'+(c.created_at?new Date(c.created_at).toLocaleDateString('ar'):'')+'</td></tr>'
+  ).join('')+'</tbody></table>';
+}
+
+async function loadEnrollments(){
+  const d=await(await fetch('/api/admin/enrollments')).json();
+  const e=d.enrollments||[];
+  if(!e.length){document.getElementById('enrollList').innerHTML='<p class="text-[#94a3b8] text-center py-8">لا توجد تسجيلات بعد</p>';return;}
+  document.getElementById('enrollList').innerHTML='<table class="w-full text-sm"><thead><tr class="border-b"><th class="text-right py-2 px-2 font-semibold text-[#475569]">الطالب</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">المسار</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">الساعات</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">تاريخ التفعيل</th></tr></thead><tbody>'+
+  e.map(x=>'<tr class="border-b hover:bg-[#f8fafc]"><td class="py-2 px-2"><div class="font-medium">'+x.student_name+'</div><div class="text-xs text-[#94a3b8]">'+x.email+'</div></td><td class="py-2 px-2 text-xs">'+x.name_ar+'</td><td class="py-2 px-2 text-xs">'+(x.total_hours?'<div class="font-bold text-[#f59e0b]">'+x.remaining_hours+'/'+x.total_hours+' ساعة</div>':'—')+'</td><td class="py-2 px-2 text-xs text-[#94a3b8]">'+(x.activated_at?new Date(x.activated_at).toLocaleDateString('ar'):'')+'</td></tr>'
+  ).join('')+'</tbody></table>';
+}
+
+async function loadUsers(){
+  const d=await(await fetch('/api/admin/users')).json();
+  const u=d.users||[];
+  document.getElementById('usersList').innerHTML='<table class="w-full text-sm"><thead><tr class="border-b"><th class="text-right py-2 px-2 font-semibold text-[#475569]">الاسم</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">الإيميل</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">الدور</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">التسجيلات</th><th class="text-right py-2 px-2 font-semibold text-[#475569]">ID</th></tr></thead><tbody>'+
+  u.map(x=>'<tr class="border-b hover:bg-[#f8fafc]"><td class="py-2 px-2 font-medium">'+x.name+'</td><td class="py-2 px-2 text-xs text-[#475569]">'+x.email+'</td><td class="py-2 px-2"><span class="badge '+(x.role==='admin'?'bg-purple-100 text-purple-700':'bg-blue-100 text-blue-700')+'">'+x.role+'</span></td><td class="py-2 px-2 font-bold text-[#3b82f6]">'+( x.enrollments||0)+'</td><td class="py-2 px-2 text-xs text-[#94a3b8]">#'+x.id+'</td></tr>'
+  ).join('')+'</tbody></table>';
+}
+
+async function loadVIP(){
+  const d=await(await fetch('/api/admin/enrollments')).json();
+  const vips=(d.enrollments||[]).filter(e=>e.total_hours);
+  if(!vips.length){document.getElementById('vipList').innerHTML='<p class="text-[#94a3b8] text-center py-8">لا يوجد طلاب VIP بعد</p>';return;}
+  document.getElementById('vipList').innerHTML=vips.map(v=>{
+    const pct=Math.round((v.remaining_hours/v.total_hours)*100);
+    return '<div class="p-4 border border-[#e2e8f0] rounded-xl mb-3"><div class="flex justify-between items-start mb-2"><div><p class="font-bold">'+v.student_name+'</p><p class="text-xs text-[#475569]">'+v.email+' | ID: '+v.user_id+'</p></div><span class="badge badge-vip">'+v.remaining_hours+' / '+v.total_hours+' ساعة</span></div><div class="w-full bg-[#f1f5f9] rounded-full h-3 mb-1"><div class="h-3 rounded-full bg-[#f59e0b]" style="width:'+pct+'%"></div></div><p class="text-xs text-[#94a3b8]">استُخدم '+v.used_hours+' ساعة</p></div>';
+  }).join('');
+}
+
+async function logHours(){
+  const uid=document.getElementById('hUserId').value,hours=parseFloat(document.getElementById('hHours').value),notes=document.getElementById('hNotes').value;
+  const msg=document.getElementById('hMsg');
+  if(!uid||!hours){msg.textContent='الرجاء إدخال ID الطالب وعدد الساعات';msg.className='text-red-600 text-sm bg-red-50 p-3 rounded-lg mt-3';msg.classList.remove('hidden');return;}
+  const d=await(await fetch('/api/admin/log-hours',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:parseInt(uid),hours,notes})})).json();
+  if(d.success){msg.textContent='✅ تم خصم '+hours+' ساعة. المتبقي: '+d.remaining+' ساعة';msg.className='text-green-600 text-sm bg-green-50 p-3 rounded-lg mt-3';msg.classList.remove('hidden');loadVIP();}
+  else{msg.textContent='❌ '+d.error;msg.className='text-red-600 text-sm bg-red-50 p-3 rounded-lg mt-3';msg.classList.remove('hidden');}
+}
+
+async function loadQs(){
+  const d=await(await fetch('/api/admin/questions')).json();
+  const qs=d.questions||[];
+  if(!qs.length){document.getElementById('qList').innerHTML='<p class="text-[#94a3b8] text-center py-8">لا توجد أسئلة بعد</p>';return;}
+  document.getElementById('qList').innerHTML='<table class="w-full text-sm"><thead><tr class="border-b"><th class="text-right py-2 px-2 text-[#475569]">العنوان</th><th class="text-right py-2 px-2 text-[#475569]">الاختبار</th><th class="text-right py-2 px-2 text-[#475569]">القسم</th><th class="text-right py-2 px-2 text-[#475569]">الحالة</th><th class="py-2 px-2"></th></tr></thead><tbody>'+
+  qs.map(q=>'<tr class="border-b hover:bg-[#f8fafc]"><td class="py-2 px-2 font-medium text-xs">'+q.title.substring(0,35)+'...</td><td class="py-2 px-2"><span class="badge '+(q.exam_type==='TOEFL'?'badge-toefl':'badge-ielts')+'">'+q.exam_type+'</span></td><td class="py-2 px-2 text-xs capitalize">'+q.module+'</td><td class="py-2 px-2"><span class="text-xs font-semibold '+(q.is_active?'text-green-600':'text-red-500')+'">'+(q.is_active?'نشط':'معطّل')+'</span></td><td class="py-2 px-2"><button onclick="delQ('+q.id+')" class="text-red-400 hover:text-red-600 text-xs"><i class="fas fa-trash"></i></button></td></tr>'
+  ).join('')+'</tbody></table>';
+}
+async function delQ(id){if(!confirm('تعطيل هذا السؤال؟'))return;await fetch('/api/admin/questions/'+id,{method:'DELETE'});loadQs();}
+async function addQ(){
+  const err=document.getElementById('aqErr'),suc=document.getElementById('aqSuc');
+  err.classList.add('hidden');suc.classList.add('hidden');
+  const opts=document.getElementById('aqOpts').value.trim();
+  const b={exam_type:document.getElementById('aqExam').value,module:document.getElementById('aqMod').value,question_type:document.getElementById('aqType').value,difficulty:document.getElementById('aqDiff').value,title:document.getElementById('aqTitle').value,content:document.getElementById('aqContent').value,passage:document.getElementById('aqPassage').value||null,options:opts?opts.split('\n').map(o=>o.trim()).filter(o=>o):null,correct_answer:document.getElementById('aqAns').value||null,explanation:document.getElementById('aqExp').value||null,points:parseFloat(document.getElementById('aqPts').value)||1};
+  if(!b.title||!b.content){err.textContent='العنوان والمحتوى مطلوبان';err.classList.remove('hidden');return;}
+  const d=await(await fetch('/api/admin/questions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();
+  if(d.success){suc.textContent='✅ تم حفظ السؤال برقم #'+d.id;suc.classList.remove('hidden');resetQ();}
+  else{err.textContent=d.error||'خطأ';err.classList.remove('hidden');}
+}
+function resetQ(){['aqTitle','aqContent','aqPassage','aqOpts','aqAns','aqExp'].forEach(id=>document.getElementById(id).value='');document.getElementById('aqPts').value='1';}
+async function loadPayments(){
+  const d=await(await fetch('/api/admin/payment-requests')).json();
+  const reqs=d.requests||[];
+  if(!reqs.length){document.getElementById('payList').innerHTML='<p class="text-[#94a3b8] text-center py-8">لا توجد طلبات دفع بعد</p>';return;}
+  document.getElementById('payList').innerHTML='<table class="w-full text-sm"><thead><tr class="border-b"><th class="text-right py-2 px-2 text-[#475569]">الطالب</th><th class="text-right py-2 px-2 text-[#475569]">المسار</th><th class="text-right py-2 px-2 text-[#475569]">المبلغ</th><th class="text-right py-2 px-2 text-[#475569]">طريقة الدفع</th><th class="text-right py-2 px-2 text-[#475569]">الحالة</th><th class="text-right py-2 px-2 text-[#475569]">التاريخ</th><th class="py-2 px-2"></th></tr></thead><tbody>'+
+  reqs.map(r=>'<tr class="border-b hover:bg-[#f8fafc]"><td class="py-2 px-2"><div class="font-medium">'+(r.student_name||'زائر')+'</div><div class="text-xs text-[#94a3b8]">'+(r.email||'—')+'</div></td><td class="py-2 px-2 text-xs">'+r.name_ar+'</td><td class="py-2 px-2 font-bold text-[#3b82f6]">'+r.amount+' د.أ</td><td class="py-2 px-2 text-xs">'+(r.payment_method||'—')+'</td><td class="py-2 px-2"><span class="badge '+(r.status==='approved'?'bg-green-100 text-green-700':'bg-yellow-100 text-yellow-700')+'">'+(r.status==='approved'?'موافق عليه':'قيد الانتظار')+'</span></td><td class="py-2 px-2 text-xs text-[#94a3b8]">'+(r.created_at?new Date(r.created_at).toLocaleDateString('ar'):'')+'</td><td class="py-2 px-2">'+(r.status!=='approved'?'<button onclick="approvePayment('+r.id+')" class="btn btn-success text-xs py-1 px-2"><i class="fas fa-check"></i> قبول</button>':'')+'</td></tr>'
+  ).join('')+'</tbody></table>';
+}
+async function approvePayment(id){
+  await fetch('/api/admin/payment-requests/'+id+'/approve',{method:'POST'});
+  loadPayments();
+}
+
+async function createAdmin(){
+  const name=document.getElementById('adName').value,email=document.getElementById('adEmail').value,password=document.getElementById('adPass').value;
+  const msg=document.getElementById('adMsg');
+  msg.classList.add('hidden');
+  if(!name||!email||!password){msg.textContent='جميع الحقول مطلوبة';msg.className='text-red-600 text-sm bg-red-50 p-3 rounded-lg';msg.classList.remove('hidden');return;}
+  const d=await(await fetch('/api/admin/create-admin',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,email,password})})).json();
+  if(d.success){msg.textContent='✅ '+d.message;msg.className='text-green-600 text-sm bg-green-50 p-3 rounded-lg';['adName','adEmail','adPass'].forEach(id=>document.getElementById(id).value='');}
+  else{msg.textContent='❌ '+d.error;msg.className='text-red-600 text-sm bg-red-50 p-3 rounded-lg';}
+  msg.classList.remove('hidden');
+}
+
+async function changePass(){
+  const uid=document.getElementById('cpUserId').value,pass=document.getElementById('cpPass').value;
+  const msg=document.getElementById('cpMsg');
+  msg.classList.add('hidden');
+  if(!uid||!pass){msg.textContent='يرجى إدخال ID الطالب وكلمة المرور';msg.className='text-red-600 text-sm bg-red-50 p-3 rounded-lg';msg.classList.remove('hidden');return;}
+  const d=await(await fetch('/api/admin/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({target_user_id:parseInt(uid),new_password:pass})})).json();
+  if(d.success){msg.textContent='✅ تم تغيير كلمة المرور بنجاح';msg.className='text-green-600 text-sm bg-green-50 p-3 rounded-lg';}
+  else{msg.textContent='❌ '+d.error;msg.className='text-red-600 text-sm bg-red-50 p-3 rounded-lg';}
+  msg.classList.remove('hidden');
+}
+
+async function setupDB(){
+  const btn=event.target;btn.disabled=true;btn.textContent='جارٍ الإعداد...';
+  const msg=document.getElementById('setupMsg');
+  const d=await(await fetch('/api/setup')).json();
+  msg.textContent=d.success?'✅ '+d.message:'❌ '+d.error;
+  msg.className='mt-3 text-sm p-3 rounded-lg '+(d.success?'bg-green-50 text-green-700':'bg-red-50 text-red-600');
+  msg.classList.remove('hidden');
+  btn.disabled=false;btn.innerHTML='<i class="fas fa-database mr-1"></i> تهيئة قاعدة البيانات';
+  loadStats();
+}
+loadStats();
+</script>`))
 })
 
-// Root redirect
+// ==================== LANDING PAGE ====================
 app.get('/', async (c) => {
   const user = await getUser(c)
   if (user) return c.redirect(user.role === 'admin' ? '/admin' : '/dashboard')
-  return c.redirect('/login')
+
+  const courseCards = [
+    {code:'IELTS_FULL',icon:'fa-globe',color:'#0ea5e9',bg:'#dbeafe',name:'IELTS الكامل',price:'150',label:'IELTS'},
+    {code:'TOEFL_FULL',icon:'fa-university',color:'#ef4444',bg:'#fee2e2',name:'TOEFL iBT الكامل',price:'180',label:'TOEFL'},
+    {code:'FOUNDATIONS',icon:'fa-layer-group',color:'#8b5cf6',bg:'#ede9fe',name:'التأسيس اللغوي',price:'150',label:'أساسيات'},
+    {code:'PRIVATE_VIP',icon:'fa-crown',color:'#f59e0b',bg:'#fef3c7',name:'خاص VIP',price:'400',label:'VIP'},
+  ].map(co =>
+    '<div class="card course-card hover:shadow-lg border-2 transition-all cursor-pointer" onclick="window.location=\'/courses#' + co.code + '\'">' +
+    '<div class="w-12 h-12 rounded-xl flex items-center justify-center mb-3" style="background:' + co.bg + '">' +
+    '<i class="fas ' + co.icon + ' text-xl" style="color:' + co.color + '"></i></div>' +
+    '<span class="badge text-xs font-bold mb-2 inline-block" style="background:' + co.bg + ';color:' + co.color + '">' + co.label + '</span>' +
+    '<h3 class="font-bold text-[#1a2b4a] mb-1">' + co.name + '</h3>' +
+    '<div class="text-2xl font-bold mt-2" style="color:' + co.color + '">' + co.price + ' <span class="text-sm font-semibold text-[#475569]">د.أ</span></div>' +
+    '<button class="btn w-full justify-center mt-3 text-sm py-2" style="background:' + co.color + ';color:white"><i class="fas fa-info-circle"></i> التفاصيل</button></div>'
+  ).join('')
+
+  const featureCards = [
+    {icon:'fa-chalkboard-teacher',color:'#3b82f6',title:'مدرب متخصص',desc:'تدريب مباشر مع مدرب ذو خبرة في IELTS وTOEFL iBT لسنوات طويلة'},
+    {icon:'fa-laptop',color:'#10b981',title:'اختبارات محاكاة',desc:'اختبارات تدريبية تحاكي الامتحان الحقيقي بالتوقيت والأسئلة'},
+    {icon:'fa-comments',color:'#f59e0b',title:'متابعة مستمرة',desc:'تواصل مباشر مع المدرب عبر الواتساب وتغذية راجعة فورية'},
+    {icon:'fa-lock-open',color:'#8b5cf6',title:'وصول فوري',desc:'فور تفعيل الكود تحصل على وصول فوري لجميع مواد المسار'},
+    {icon:'fa-mobile-alt',color:'#ef4444',title:'يعمل على موبايل',desc:'منصة متجاوبة تعمل على الموبايل والكمبيوتر بشكل مثالي'},
+    {icon:'fa-shield-alt',color:'#0ea5e9',title:'دفع آمن',desc:'دفع محلي عبر Zain Cash وCliQ مع ضمان استلام الكود'},
+  ].map(f =>
+    '<div class="card"><div class="w-12 h-12 rounded-xl flex items-center justify-center mb-3" style="background:' + f.color + '20">' +
+    '<i class="fas ' + f.icon + ' text-xl" style="color:' + f.color + '"></i></div>' +
+    '<h3 class="font-bold text-[#1a2b4a] mb-1">' + f.title + '</h3>' +
+    '<p class="text-sm text-[#475569]">' + f.desc + '</p></div>'
+  ).join('')
+
+  return c.html(L('منصة The Yamen Guide – IELTS & TOEFL iBT', `
+<nav class="navbar">
+  <a href="/" class="brand"><i class="fas fa-graduation-cap text-[#f59e0b]"></i> The Yamen <span class="g">Guide</span></a>
+  <div class="flex items-center gap-3">
+    <a href="/courses" class="text-[#94a3b8] hover:text-white text-sm hidden sm:block">الأسعار</a>
+    <a href="/login" class="btn btn-primary text-sm">دخول / تسجيل</a>
+  </div>
+</nav>
+<section class="bg-gradient-to-br from-[#0f1e35] to-[#1a2b4a] text-white py-16 px-4">
+  <div class="max-w-5xl mx-auto text-center">
+    <div class="inline-flex items-center gap-2 bg-[#f59e0b]/20 border border-[#f59e0b]/40 rounded-full px-4 py-1.5 mb-6 text-[#f59e0b] text-sm font-semibold">
+      <i class="fas fa-star"></i> منصة تدريبية متخصصة في الأردن
+    </div>
+    <h1 class="text-4xl md:text-5xl font-bold mb-4 leading-tight">حقّق درجتك المطلوبة في<br/><span class="text-[#0ea5e9]">IELTS</span> و <span class="text-[#ef4444]">TOEFL iBT</span></h1>
+    <p class="text-[#94a3b8] text-lg mb-8 max-w-2xl mx-auto">تدريب احترافي مع مدرب متخصص، مواد عالية الجودة، ومحاكاة حقيقية للاختبار. المنصة تستهدف الطلاب في الأردن والمنطقة العربية.</p>
+    <div class="flex flex-col sm:flex-row gap-4 justify-center">
+      <a href="/login" class="btn btn-gold py-3 px-8 text-base"><i class="fas fa-rocket"></i> ابدأ الآن</a>
+      <a href="/courses" class="btn btn-outline py-3 px-8 text-base" style="color:white;border-color:rgba(255,255,255,.3)"><i class="fas fa-tag"></i> عرض الأسعار</a>
+    </div>
+    <div class="grid grid-cols-3 gap-6 mt-12 max-w-xl mx-auto">
+      <div><div class="text-3xl font-bold text-[#f59e0b]">100+</div><div class="text-[#94a3b8] text-sm mt-1">طالب مستفيد</div></div>
+      <div><div class="text-3xl font-bold text-[#0ea5e9]">4</div><div class="text-[#94a3b8] text-sm mt-1">أقسام تدريبية</div></div>
+      <div><div class="text-3xl font-bold text-[#10b981]">7+</div><div class="text-[#94a3b8] text-sm mt-1">Band مضمون IELTS</div></div>
+    </div>
+  </div>
+</section>
+<section class="py-12 px-4 bg-white">
+  <div class="max-w-5xl mx-auto">
+    <h2 class="text-2xl font-bold text-[#1a2b4a] text-center mb-2">المسارات المتاحة</h2>
+    <p class="text-[#475569] text-center mb-8">اختر المسار المناسب لهدفك</p>
+    <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-4">${courseCards}</div>
+    <div class="text-center mt-6">
+      <a href="/courses" class="btn btn-primary px-8 py-3"><i class="fas fa-th-list"></i> عرض جميع المسارات والأسعار</a>
+    </div>
+  </div>
+</section>
+<section class="py-12 px-4 bg-[#f8fafc]">
+  <div class="max-w-5xl mx-auto">
+    <h2 class="text-2xl font-bold text-[#1a2b4a] text-center mb-8">لماذا The Yamen Guide؟</h2>
+    <div class="grid md:grid-cols-3 gap-6">${featureCards}</div>
+  </div>
+</section>
+<section class="py-12 px-4 bg-gradient-to-r from-[#1a2b4a] to-[#0f1e35] text-white text-center">
+  <div class="max-w-2xl mx-auto">
+    <h2 class="text-2xl font-bold mb-3">ابدأ رحلتك اليوم</h2>
+    <p class="text-[#94a3b8] mb-6">سجّل حسابك مجاناً وابدأ التدريب. كود التفعيل يصلك بعد الدفع عبر الواتساب.</p>
+    <div class="flex flex-col sm:flex-row gap-4 justify-center">
+      <a href="/login" class="btn btn-gold py-3 px-8 text-base"><i class="fas fa-user-plus"></i> إنشاء حساب مجاني</a>
+      <a href="https://wa.me/962798919150?text=%D8%A3%D8%B1%D9%8A%D8%AF%20%D8%A7%D9%84%D8%A7%D8%B3%D8%AA%D9%81%D8%B3%D8%A7%D8%B1" target="_blank" class="btn btn-wa py-3 px-8 text-base"><i class="fab fa-whatsapp"></i> تواصل معنا</a>
+    </div>
+  </div>
+</section>
+<footer class="bg-[#0f1e35] text-[#475569] text-center py-6 text-sm">
+  <p>© 2026 The Yamen Guide – منصة تدريبية متخصصة في الأردن</p>
+  <p class="mt-1">للتواصل: <a href="https://wa.me/962798919150" class="text-[#25d366] hover:underline">0798919150</a></p>
+</footer>
+`))
 })
+
+app.use('/static/*', serveStatic({ root: './' }))
 
 export default app
